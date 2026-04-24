@@ -29,6 +29,31 @@ SOURCE_REQUIRED_HEADERS = [
     "箱号",
 ]
 
+MUL_SKU_REQUIRED_HEADERS = [
+    "序号",
+    "MSKU",
+    "FNSKU",
+    "品名",
+    "SKU",
+    "发货数量",
+    "已装箱数",
+]
+
+MUL_SKU_BOX_HEADER_RE = re.compile(r"^第(\d+)箱$")
+MUL_OUTPUT_HEADERS = ["NO.", "MSKU型号", "工厂型号", "箱号", "套", "箱数", "套/箱", "条码", "箱号", ""]
+MUL_OUTPUT_COLUMN_WIDTHS = {
+    1: 6.75,
+    2: 18.5,
+    3: 28.25,
+    4: 24.9,
+    5: 8.6,
+    6: 13,
+    7: 13,
+    8: 15.75,
+    9: 28.4,
+    10: 25.4,
+}
+
 TEMPLATE_REQUIRED_HEADERS = [
     "NO.",
     "SKU",
@@ -114,6 +139,14 @@ class WorkbookSelection:
     sheet_name: str
     header_row: int
     headers: dict[str, int]
+
+
+@dataclass
+class SourceWorkbookInfo:
+    path: Path
+    format_type: str
+    selection: WorkbookSelection
+    box_columns: list[tuple[int, int]]
 
 
 @dataclass
@@ -210,6 +243,39 @@ def find_matching_sheet(workbook_path: Path, required_headers: list[str]) -> Wor
         workbook.close()
 
     raise ValueError(f"未在 {workbook_path.name} 中找到包含以下表头的工作表：{', '.join(required_headers)}")
+
+
+def classify_source_workbook(workbook_path: Path) -> SourceWorkbookInfo | None:
+    workbook = load_workbook(workbook_path, data_only=False, rich_text=True)
+    try:
+        for sheet_name in workbook.sheetnames:
+            worksheet = workbook[sheet_name]
+            for row_idx in range(1, min(worksheet.max_row, 20) + 1):
+                row_headers: dict[str, int] = {}
+                box_columns: list[tuple[int, int]] = []
+                for col_idx in range(1, worksheet.max_column + 1):
+                    normalized = normalize_header(worksheet.cell(row=row_idx, column=col_idx).value)
+                    if not normalized:
+                        continue
+                    row_headers[normalized] = col_idx
+                    box_match = MUL_SKU_BOX_HEADER_RE.fullmatch(normalized)
+                    if box_match:
+                        box_columns.append((int(box_match.group(1)), col_idx))
+
+                selection = WorkbookSelection(
+                    path=workbook_path,
+                    sheet_name=sheet_name,
+                    header_row=row_idx,
+                    headers=row_headers,
+                )
+                if all(header in row_headers for header in SOURCE_REQUIRED_HEADERS):
+                    return SourceWorkbookInfo(workbook_path, "ONE_SKU", selection, [])
+                if all(header in row_headers for header in MUL_SKU_REQUIRED_HEADERS) and box_columns:
+                    return SourceWorkbookInfo(workbook_path, "MUL_SKU", selection, sorted(box_columns))
+    finally:
+        workbook.close()
+
+    return None
 
 
 def locate_template_file(base_dir: Path) -> Path:
@@ -757,8 +823,370 @@ def resolve_store_lookup(
     )
 
 
-def process_workbooks(resource_dir: Path, source_dir: Path, output_dir: Path) -> dict[str, Any]:
-    source_files = select_source_files(source_dir)
+def as_plain_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def extract_mul_shipment_date(cargo_name: Any, source_path: Path) -> tuple[str, str, str | None]:
+    text = as_plain_text(cargo_name)
+    full_match = re.search(r"(20\d{6})(?!\d)", text)
+    if full_match:
+        full_date = full_match.group(1)
+        return f"{full_date[:4]}.{full_date[4:6]}.{full_date[6:8]}", full_date[2:], None
+
+    short_matches = re.findall(r"(?<!\d)(\d{6})(?!\d)", text)
+    if short_matches:
+        short_date = short_matches[-1]
+        full_date = f"20{short_date}"
+        return f"{full_date[:4]}.{full_date[4:6]}.{full_date[6:8]}", short_date, None
+
+    fallback_date, anomaly = extract_ticket_date({"货件名称": cargo_name}, source_path)
+    full_date = f"20{fallback_date}"
+    return f"{full_date[:4]}.{full_date[4:6]}.{full_date[6:8]}", fallback_date, anomaly
+
+
+def format_country_name(country_code: str) -> str:
+    return {
+        "US": "United States",
+        "USA": "United States",
+        "CA": "Canada",
+        "MX": "Mexico",
+    }.get(country_code.upper(), country_code)
+
+
+def format_mul_warehouse_address(fc_code: Any, raw_address: Any) -> str:
+    fc = as_plain_text(fc_code) or "UNKNOWN"
+    parts = [part.strip() for part in as_plain_text(raw_address).split(",") if part.strip()]
+    if not parts:
+        return f"仓库地址：{fc}"
+
+    start_idx = 1 if parts and (parts[0].upper() == fc.upper() or "AMAZON" in parts[0].upper()) else 0
+    street = parts[start_idx] if len(parts) > start_idx else ""
+    city = parts[start_idx + 1] if len(parts) > start_idx + 1 else ""
+    state = parts[start_idx + 2] if len(parts) > start_idx + 2 else ""
+    postal = parts[start_idx + 3] if len(parts) > start_idx + 3 else ""
+    country = format_country_name(parts[start_idx + 4]) if len(parts) > start_idx + 4 else ""
+
+    address_parts = [fc]
+    if street or postal:
+        address_parts.append(" ".join(part for part in [street, postal] if part))
+    if city or state:
+        address_parts.append(", ".join(part for part in [city, state] if part))
+    if country:
+        address_parts.append(country)
+    return f"仓库地址：{' - '.join(address_parts)}"
+
+
+def sanitize_output_filename_part(value: Any) -> str:
+    text = as_plain_text(value) or "UNKNOWN"
+    return re.sub(r'[\\/:*?"<>|]+', "_", text).strip(" ._") or "UNKNOWN"
+
+
+def build_mul_output_name(cargo_name: Any, fba_number: Any) -> str:
+    return f"装箱信息-{sanitize_output_filename_part(cargo_name)}-{sanitize_output_filename_part(fba_number)}.xlsx"
+
+
+def extract_mul_detail_rows(worksheet: Worksheet, selection: WorkbookSelection) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row_idx in range(selection.header_row + 1, worksheet.max_row + 1):
+        sequence = worksheet.cell(row=row_idx, column=selection.headers["序号"]).value
+        msku = worksheet.cell(row=row_idx, column=selection.headers["MSKU"]).value
+        if is_blank(sequence) and is_blank(msku):
+            continue
+        if is_blank(msku):
+            continue
+        row_data = {
+            header: worksheet.cell(row=row_idx, column=selection.headers[header]).value
+            for header in MUL_SKU_REQUIRED_HEADERS
+            if header in selection.headers
+        }
+        row_data["_worksheet_row"] = row_idx
+        rows.append(row_data)
+    return rows
+
+
+def normalize_mul_quantity(value: Any) -> int | float | None:
+    number = convert_numeric(value)
+    if isinstance(number, (int, float)) and not isinstance(number, bool) and number > 0:
+        return number
+    return None
+
+
+def format_box_sequence(start_box: int, end_box: int) -> str:
+    if start_box == end_box:
+        return f"编号{start_box:02d}"
+    return f"编号{start_box:02d}-{end_box:02d}"
+
+
+def format_carton_range(box_numbers: list[str]) -> str | None:
+    clean_numbers = [number for number in box_numbers if not is_blank(number)]
+    if not clean_numbers:
+        return None
+    if len(clean_numbers) == 1:
+        return clean_numbers[0]
+    return f"{clean_numbers[0]}-{clean_numbers[-1]}"
+
+
+def same_mul_box_signature(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
+    return [
+        (item["msku"], item["factory_sku"], item["fnsku"], item["quantity_per_box"])
+        for item in left
+    ] == [
+        (item["msku"], item["factory_sku"], item["fnsku"], item["quantity_per_box"])
+        for item in right
+    ]
+
+
+def build_mul_box_groups(
+    worksheet: Worksheet,
+    selection: WorkbookSelection,
+    source_rows: list[dict[str, Any]],
+    box_columns: list[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    carton_number_row = selection.header_row + 9
+    groups: list[dict[str, Any]] = []
+    current_group: dict[str, Any] | None = None
+    previous_primary_msku: Any = None
+
+    for box_number, col_idx in box_columns:
+        items: list[dict[str, Any]] = []
+        for source_row in source_rows:
+            quantity = normalize_mul_quantity(
+                worksheet.cell(
+                    row=source_row["_worksheet_row"],
+                    column=col_idx,
+                ).value
+            )
+            if quantity is None:
+                continue
+            items.append(
+                {
+                    "msku": source_row.get("MSKU"),
+                    "factory_sku": source_row.get("SKU"),
+                    "fnsku": source_row.get("FNSKU"),
+                    "quantity_per_box": quantity,
+                }
+            )
+
+        if not items:
+            continue
+
+        if previous_primary_msku is not None and any(item["msku"] == previous_primary_msku for item in items):
+            items = sorted(items, key=lambda item: 0 if item["msku"] == previous_primary_msku else 1)
+
+        carton_number = as_plain_text(worksheet.cell(row=carton_number_row, column=col_idx).value)
+        if current_group and same_mul_box_signature(current_group["items"], items):
+            current_group["end_box"] = box_number
+            current_group["carton_numbers"].append(carton_number)
+        else:
+            current_group = {
+                "start_box": box_number,
+                "end_box": box_number,
+                "items": items,
+                "carton_numbers": [carton_number],
+            }
+            groups.append(current_group)
+            previous_primary_msku = items[0]["msku"]
+
+    return groups
+
+
+def apply_mul_cell_style(cell, *, bold: bool = False, size: int = 12, wrap: bool = True) -> None:
+    cell.font = Font(name="宋体", size=size, bold=bold)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=wrap)
+    cell.border = FULL_BORDER
+
+
+def apply_mul_output_layout(worksheet: Worksheet) -> None:
+    for col_idx, width in MUL_OUTPUT_COLUMN_WIDTHS.items():
+        worksheet.column_dimensions[get_column_letter(col_idx)].width = width
+    worksheet.row_dimensions[1].height = 77
+    worksheet.row_dimensions[2].height = 23
+    worksheet.row_dimensions[3].height = 23
+
+
+def merge_and_style(worksheet: Worksheet, cell_range: str) -> None:
+    ensure_merge_range(worksheet, cell_range)
+    sync_merged_range_borders(worksheet, cell_range)
+
+
+def process_mul_sku_workbook(
+    resource_dir: Path,
+    output_dir: Path,
+    source_info: SourceWorkbookInfo,
+    msku_index: dict[str, list[dict[str, Any]]],
+    store_index: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    source_path = source_info.path
+    anomalies: list[str] = []
+    workbook = load_workbook(source_path, data_only=False, rich_text=True)
+    output_workbook = Workbook()
+    try:
+        source_sheet = workbook[source_info.selection.sheet_name]
+        metadata = extract_metadata(source_sheet, source_info.selection.header_row)
+        shipment_no = metadata.get("货件单号")
+        fba_number, fba_anomaly = extract_fba_number(shipment_no)
+        if fba_anomaly:
+            anomalies.append(fba_anomaly)
+
+        cargo_name = metadata.get("货件名称")
+        fc_code = metadata.get("物流中心编码")
+        date_display, short_date, date_anomaly = extract_mul_shipment_date(cargo_name, source_path)
+        if date_anomaly:
+            anomalies.append(date_anomaly)
+
+        source_rows = extract_mul_detail_rows(source_sheet, source_info.selection)
+        if not source_rows:
+            raise ValueError(f"{source_path.name} 未解析到混装 SKU 明细行")
+
+        lookup_results = [
+            resolve_store_lookup(
+                row_number=index,
+                msku_value=row.get("MSKU"),
+                ticket_index=1,
+                msku_index=msku_index,
+                store_index=store_index,
+                anomalies=anomalies,
+            )
+            for index, row in enumerate(source_rows, start=1)
+        ]
+        store_shorts = dedupe_preserve_order(
+            [result.store_short for result in lookup_results if not is_blank(result.store_short)]
+        )
+        store_short = store_shorts[0] if store_shorts else "UNKNOWN"
+        if len(store_shorts) > 1:
+            anomalies.append(f"混装文件存在多个店铺简称：{', '.join(store_shorts)}")
+
+        groups = build_mul_box_groups(source_sheet, source_info.selection, source_rows, source_info.box_columns)
+        if not groups:
+            raise ValueError(f"{source_path.name} 未解析到有效箱列")
+
+        total_units = sum(
+            (convert_numeric(row.get("发货数量")) or 0)
+            for row in source_rows
+            if isinstance(convert_numeric(row.get("发货数量")) or 0, (int, float))
+        )
+        total_cartons = sum(group["end_box"] - group["start_box"] + 1 for group in groups)
+
+        worksheet = output_workbook.active
+        worksheet.title = f"共1票{int(total_units) if float(total_units).is_integer() else total_units}件"
+        apply_mul_output_layout(worksheet)
+
+        merge_and_style(worksheet, "A1:G1")
+        worksheet["A1"] = f"装箱单（{store_short}）第1票-{fba_number or ''}"
+        worksheet["A1"].font = Font(name="宋体", size=18, bold=True)
+        worksheet["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        worksheet["A1"].border = FULL_BORDER
+        worksheet["H1"] = f"{date_display}\n-美西时间"
+        worksheet["I1"] = format_mul_warehouse_address(fc_code, metadata.get("配送地址"))
+        worksheet["J1"] = "发往美国"
+        for col_idx in range(8, 11):
+            apply_mul_cell_style(worksheet.cell(row=1, column=col_idx), size=15)
+
+        for col_idx, header in enumerate(MUL_OUTPUT_HEADERS, start=1):
+            cell = worksheet.cell(row=2, column=col_idx)
+            cell.value = header
+            apply_mul_cell_style(cell)
+            apply_mul_cell_style(worksheet.cell(row=3, column=col_idx))
+            if col_idx <= 9:
+                merge_and_style(worksheet, f"{get_column_letter(col_idx)}2:{get_column_letter(col_idx)}3")
+
+        worksheet["D2"] = CellRichText(
+            "箱号  ",
+            TextBlock(InlineFont(rFont="Arial", b=True, sz=12, color="FF0000"), "FBA"),
+            TextBlock(InlineFont(rFont="宋体", b=True, sz=12, color="FF0000"), f"编号\n{fba_number or ''}"),
+        )
+        apply_mul_cell_style(worksheet["D2"], bold=True)
+
+        output_row = 4
+        output_no = 1
+        for group in groups:
+            group_start_row = output_row
+            group_box_count = group["end_box"] - group["start_box"] + 1
+            group_units_per_box = sum(convert_numeric(item["quantity_per_box"]) or 0 for item in group["items"])
+            carton_range = format_carton_range(group["carton_numbers"])
+            for item_index, item in enumerate(group["items"]):
+                worksheet.row_dimensions[output_row].height = 23 if output_row != 4 else 33
+                values = {
+                    1: output_no,
+                    2: item["msku"],
+                    3: item["factory_sku"],
+                    4: format_box_sequence(group["start_box"], group["end_box"]) if item_index == 0 else None,
+                    5: (convert_numeric(item["quantity_per_box"]) or 0) * group_box_count,
+                    6: group_box_count if item_index == 0 else None,
+                    7: group_units_per_box if item_index == 0 else None,
+                    8: item["fnsku"],
+                    9: carton_range if item_index == 0 else None,
+                }
+                for col_idx in range(1, 11):
+                    cell = worksheet.cell(row=output_row, column=col_idx)
+                    cell.value = values.get(col_idx)
+                    apply_mul_cell_style(cell)
+                output_no += 1
+                output_row += 1
+
+            if len(group["items"]) > 1:
+                for col_idx in [4, 6, 7, 9]:
+                    merge_and_style(
+                        worksheet,
+                        f"{get_column_letter(col_idx)}{group_start_row}:{get_column_letter(col_idx)}{output_row - 1}",
+                    )
+
+        summary_row = output_row
+        worksheet.row_dimensions[summary_row].height = 23
+        worksheet.cell(row=summary_row, column=1).value = "合计"
+        worksheet.cell(row=summary_row, column=5).value = f"=SUM(E4:E{summary_row - 1})"
+        worksheet.cell(row=summary_row, column=6).value = f"=SUM(F4:F{summary_row - 1})"
+        for col_idx in range(1, 11):
+            apply_mul_cell_style(worksheet.cell(row=summary_row, column=col_idx))
+
+        output_path = save_workbook_with_fallback(output_workbook, output_dir / build_mul_output_name(cargo_name, fba_number))
+        report = {
+            "format_type": "MUL_SKU",
+            "source_workbook": source_path.name,
+            "source_sheet": source_info.selection.sheet_name,
+            "shipment_number": fba_number,
+            "cargo_name": cargo_name,
+            "warehouse_code": fc_code,
+            "ticket_date": short_date,
+            "total_units": total_units,
+            "total_cartons": total_cartons,
+            "box_group_count": len(groups),
+            "store_lookup_summary": {
+                "resolved_store_shorts": store_shorts,
+                "rows": [
+                    {
+                        "row_number": index,
+                        "msku": result.msku,
+                        "store_site": result.store_site,
+                        "store_short": result.store_short,
+                        "store_name": result.store_name,
+                        "mapped_line": result.mapped_line,
+                    }
+                    for index, result in enumerate(lookup_results, start=1)
+                ],
+            },
+            "anomalies": dedupe_preserve_order(anomalies),
+            "output_workbook": output_path.name,
+        }
+        report_path = output_path.with_name(f"{output_path.stem}_report.json")
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report["report_file"] = report_path.name
+        return report
+    finally:
+        workbook.close()
+        output_workbook.close()
+
+
+def process_one_sku_workbooks(
+    resource_dir: Path,
+    source_dir: Path,
+    output_dir: Path,
+    source_files: list[Path] | None = None,
+) -> dict[str, Any]:
+    source_files = source_files or select_source_files(source_dir)
     if not source_files:
         raise FileNotFoundError("未找到可处理的领星源数据 Excel 文件。")
 
@@ -1207,6 +1635,16 @@ def process_workbooks(resource_dir: Path, source_dir: Path, output_dir: Path) ->
             "validations": validations,
             "anomalies": anomalies,
             "output_workbook": output_path.name,
+            "processing_output_files": [
+                {
+                    "format_type": "ONE_SKU",
+                    "output_workbook": output_path.name,
+                    "source_workbooks": [path.name for path in source_files],
+                    "ticket_count": len(source_files),
+                    "total_units": total_expected_set,
+                    "total_cartons": total_expected_carton,
+                }
+            ],
         }
 
         report_path = output_path.with_name(f"{output_path.stem}_report.json")
@@ -1215,6 +1653,110 @@ def process_workbooks(resource_dir: Path, source_dir: Path, output_dir: Path) ->
         return report
     finally:
         template_workbook.close()
+
+
+def process_workbooks(resource_dir: Path, source_dir: Path, output_dir: Path) -> dict[str, Any]:
+    source_files = select_source_files(source_dir)
+    if not source_files:
+        raise FileNotFoundError("未找到可处理的领星源数据 Excel 文件。")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    classified_files: list[SourceWorkbookInfo] = []
+    unknown_files: list[Path] = []
+    for source_path in source_files:
+        source_info = classify_source_workbook(source_path)
+        if source_info is None:
+            unknown_files.append(source_path)
+        else:
+            classified_files.append(source_info)
+
+    one_sku_files = [info.path for info in classified_files if info.format_type == "ONE_SKU"]
+    mul_sku_infos = [info for info in classified_files if info.format_type == "MUL_SKU"]
+
+    if one_sku_files and not mul_sku_infos and not unknown_files:
+        return process_one_sku_workbooks(resource_dir, source_dir, output_dir, source_files=one_sku_files)
+
+    output_files: list[dict[str, Any]] = []
+    child_reports: list[dict[str, Any]] = []
+    anomalies: list[str] = []
+
+    if unknown_files:
+        anomalies.extend([f"无法识别源文件格式，已跳过：{path.name}" for path in unknown_files])
+
+    if one_sku_files:
+        one_report = process_one_sku_workbooks(resource_dir, source_dir, output_dir, source_files=one_sku_files)
+        child_reports.append(one_report)
+        output_files.append(
+            {
+                "format_type": "ONE_SKU",
+                "output_workbook": one_report.get("output_workbook"),
+                "report_file": one_report.get("report_file"),
+                "source_workbooks": [path.name for path in one_sku_files],
+                "ticket_count": len(one_sku_files),
+            }
+        )
+        anomalies.extend(one_report.get("anomalies", []))
+
+    if mul_sku_infos:
+        msku_map_path = locate_msku_mapping_file(resource_dir)
+        store_detail_path = locate_store_detail_file(resource_dir)
+        msku_selection = find_matching_sheet(msku_map_path, MSKU_MAP_REQUIRED_HEADERS)
+        store_selection = find_matching_sheet(store_detail_path, STORE_DETAIL_REQUIRED_HEADERS)
+        msku_index = build_lookup_index(msku_map_path, msku_selection, "MSKU")
+        store_index = build_lookup_index(store_detail_path, store_selection, "店铺+站点")
+
+        for source_info in mul_sku_infos:
+            mul_report = process_mul_sku_workbook(resource_dir, output_dir, source_info, msku_index, store_index)
+            child_reports.append(mul_report)
+            output_files.append(
+                {
+                    "format_type": "MUL_SKU",
+                    "output_workbook": mul_report.get("output_workbook"),
+                    "report_file": mul_report.get("report_file"),
+                    "source_workbooks": [source_info.path.name],
+                    "total_units": mul_report.get("total_units"),
+                    "total_cartons": mul_report.get("total_cartons"),
+                }
+            )
+            anomalies.extend(mul_report.get("anomalies", []))
+
+    if not output_files:
+        skipped_names = ", ".join(path.name for path in unknown_files) or "无"
+        raise ValueError(f"未生成任何输出文件；无法识别或不可处理的源文件：{skipped_names}")
+
+    primary_output = next((item.get("output_workbook") for item in output_files if item.get("output_workbook")), None)
+    report = {
+        "files_read": {
+            "resource_dir": str(resource_dir),
+            "source_dir": str(source_dir),
+            "output_dir": str(output_dir),
+            "source_workbooks": [path.name for path in source_files],
+        },
+        "source_file_formats": [
+            {"source_workbook": info.path.name, "format_type": info.format_type}
+            for info in classified_files
+        ]
+        + [
+            {"source_workbook": path.name, "format_type": "UNKNOWN"}
+            for path in unknown_files
+        ],
+        "child_reports": [
+            {
+                "format_type": child.get("format_type", "ONE_SKU"),
+                "output_workbook": child.get("output_workbook"),
+                "report_file": child.get("report_file"),
+            }
+            for child in child_reports
+        ],
+        "processing_output_files": output_files,
+        "anomalies": dedupe_preserve_order(anomalies),
+        "output_workbook": primary_output,
+    }
+    report_path = output_dir / "processing_report.json"
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    report["report_file"] = report_path.name
+    return report
 
 
 def main() -> None:

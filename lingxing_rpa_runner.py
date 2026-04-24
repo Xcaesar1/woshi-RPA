@@ -73,6 +73,24 @@ def sanitize_filename_part(value: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", value).strip(" ._") or "UNKNOWN"
 
 
+def extract_download_type_marker(filename: str) -> str | None:
+    upper_name = filename.upper()
+    if "MUL_SKU" in upper_name:
+        return "MUL_SKU"
+    if "ONE_SKU" in upper_name:
+        return "ONE_SKU"
+    return None
+
+
+def build_download_filename(fba_code: str, index: int, warehouse_code: str, original_name: str, suffix: str) -> str:
+    type_marker = extract_download_type_marker(original_name)
+    parts = [sanitize_filename_part(fba_code), f"{index:02d}", warehouse_code]
+    if type_marker:
+        parts.append(type_marker)
+    parts.append("NO_PIC")
+    return "_".join(parts) + suffix
+
+
 def build_timestamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -1188,7 +1206,13 @@ return best;
             self._click_download_button_in_card(card)
             self._choose_export_without_images()
             downloaded_path = self._wait_for_download_file(download_dir, previous_names)
-            target_path = download_dir / f"{sanitize_filename_part(fba_code)}_{index:02d}_{warehouse_code}_NO_PIC{downloaded_path.suffix or '.xlsx'}"
+            target_path = download_dir / build_download_filename(
+                fba_code,
+                index,
+                warehouse_code,
+                downloaded_path.name,
+                downloaded_path.suffix or ".xlsx",
+            )
             if target_path.exists():
                 target_path = download_dir / f"{target_path.stem}_{build_timestamp()}{target_path.suffix}"
             downloaded_path.rename(target_path)
@@ -1540,7 +1564,7 @@ class LingxingPlaywrightAutomation:
             download = download_info.value
             suggested_name = download.suggested_filename or f"{fba_code}_{index}.xlsx"
             suffix = Path(suggested_name).suffix or ".xlsx"
-            target_path = download_dir / f"{sanitize_filename_part(fba_code)}_{index:02d}_{warehouse_code}_NO_PIC{suffix}"
+            target_path = download_dir / build_download_filename(fba_code, index, warehouse_code, suggested_name, suffix)
             if target_path.exists():
                 target_path = download_dir / f"{target_path.stem}_{build_timestamp()}{target_path.suffix}"
             download.save_as(str(target_path))
@@ -1643,6 +1667,7 @@ def run_single_fba(
         "screenshots_dir": str(screenshot_dir),
         "downloaded_files": [],
         "processing_output_workbook": None,
+        "processing_output_files": [],
         "processing_report_file": None,
         "error_code": None,
         "error": None,
@@ -1659,6 +1684,7 @@ def run_single_fba(
 
         process_report = process_workbooks(resource_dir, download_dir, output_dir)
         report["processing_output_workbook"] = process_report.get("output_workbook")
+        report["processing_output_files"] = process_report.get("processing_output_files", [])
         report["processing_report_file"] = process_report.get("report_file")
         report["processing_anomalies"] = process_report.get("anomalies", [])
         report["status"] = "success"
