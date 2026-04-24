@@ -15,22 +15,23 @@ router = APIRouter(prefix="/api")
 
 @router.post("/tasks")
 def create_task_api(
-    manifest_file: UploadFile = File(...),
+    manifest_file: UploadFile | None = File(None),
+    fba_text: str = Form(""),
     workflow_name: str = Form(...),
     submitter: str = Form(...),
-    remark: str = Form(""),
 ):
     try:
         task = create_task_submission(
             manifest_upload=manifest_file,
+            fba_text=fba_text,
             workflow_name=workflow_name,
             submitter=submitter,
-            remark=remark,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
-        manifest_file.file.close()
+        if manifest_file is not None:
+            manifest_file.file.close()
 
     return {
         "task": task,
