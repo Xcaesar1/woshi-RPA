@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ page_title }}</title>
+  {% for style_url in style_urls %}
+  <link rel="stylesheet" href="{{ style_url }}">
+  {% endfor %}
+</head>
+<body>
+  <noscript>请启用浏览器 JavaScript 后再使用本系统。</noscript>
+  <div id="root"></div>
+  <script id="page-data" type="application/json">{{ page_data | tojson }}</script>
+  <script type="module" src="{{ entry_script_url }}"></script>
+</body>
+</html>
