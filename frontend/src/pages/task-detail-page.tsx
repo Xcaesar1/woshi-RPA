@@ -1,6 +1,5 @@
 import { AppShell } from "@/components/layout/app-shell";
 import { BentoGrid, BentoGridItem } from "@/components/ui/bento-grid";
-import { PointerHighlight } from "@/components/ui/pointer-highlight";
 import { PrimaryButton, SecondaryLink } from "@/components/ui/primary-button";
 import { StatusPill } from "@/components/ui/status-pill";
 import { fetchJson } from "@/lib/http";
@@ -102,19 +101,18 @@ function TaskDetailPage() {
       }
       subtitle={
         <>
-          你不用再到多个目录里翻文件。当前任务的执行阶段、结果包是否可下载、每个 FBA 的下载数量和异常信息，都能直接在这里看到。
+          你不用再到多个目录里翻文件。当前任务的执行阶段、成品文件是否可下载、每个 FBA 的下载数量和异常信息，都能直接在这里看到。
         </>
       }
       callout={
-        <PointerHighlight
-          rectangleClassName="rounded-full border-[color:oklch(0.73_0.03_188)]"
-          pointerClassName="text-[color:oklch(0.53_0.08_188)]"
-          containerClassName="max-w-fit rounded-full bg-white/70 px-4 py-2"
-        >
-          <span className="text-sm font-medium text-[color:oklch(0.35_0.03_230)]">
-            当前任务编号：{task.id}
+        <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-[color:oklch(0.76_0.025_188)] bg-white/82 px-4 py-2 shadow-[0_12px_30px_rgba(42,70,64,0.08)]">
+          <span className="h-2 w-2 shrink-0 rounded-full bg-[color:oklch(0.54_0.09_182)] shadow-[0_0_0_4px_color-mix(in_oklch,oklch(0.54_0.09_182)_16%,transparent)]" />
+          <span className="shrink-0 text-sm font-medium text-[color:oklch(0.38_0.03_230)]">当前任务编号</span>
+          <span className="text-sm text-[color:oklch(0.62_0.025_220)]">:</span>
+          <span className="min-w-0 truncate text-sm font-semibold tabular-nums text-[color:oklch(0.29_0.035_230)]">
+            {task.id}
           </span>
-        </PointerHighlight>
+        </div>
       }
       actions={
         <>
