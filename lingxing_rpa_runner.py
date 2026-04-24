@@ -1343,6 +1343,17 @@ class LingxingPlaywrightAutomation:
                 time.sleep(0.3)
         return False
 
+    def _wait_for_url_contains_any(self, texts: list[str], timeout: int = DEFAULT_PAGE_TIMEOUT) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.page is not None and any(text in self.page.url for text in texts):
+                return True
+            if self.page is not None:
+                self.page.wait_for_timeout(300)
+            else:
+                time.sleep(0.3)
+        return False
+
     def ensure_logged_in(self) -> None:
         self.page.goto(LINGXING_HOME_URL, wait_until="domcontentloaded", timeout=120000)
         self.page.wait_for_timeout(1500)
@@ -1457,10 +1468,70 @@ class LingxingPlaywrightAutomation:
             matches[0].click(timeout=5000, force=True)
         except Exception:
             matches[0].evaluate("(node) => node.click()")
-        if self._wait_for_url_contains("SendToAmazonDetail", timeout=DEFAULT_PAGE_TIMEOUT):
+        if self._wait_for_url_contains_any(["SendToAmazonDetail", "ShipmentDetail"], timeout=DEFAULT_PAGE_TIMEOUT):
             self.page.wait_for_timeout(2000)
             return
         raise AutomationError("shipment_detail_timeout", f"进入 FBA {fba_code} 详情页超时")
+
+    def _detect_shipment_stage(self) -> str:
+        page_text = self._page_text()
+        stage_patterns = [
+            ("Review/check Shipment Content", "Review/check Shipment Content"),
+            ("选择发货商品", "选择发货商品"),
+            ("Transportation Service", "Transportation Service"),
+            ("配送服务", "配送服务"),
+            ("Shipment Packaging", "Shipment Packaging"),
+            ("商品装箱", "商品装箱"),
+            ("Box Labels", "Box Labels"),
+            ("箱子标签", "箱子标签"),
+            ("Shipment Tracking", "Shipment Tracking"),
+            ("货件追踪", "货件追踪"),
+        ]
+        for keyword, label in stage_patterns:
+            if keyword in page_text:
+                return label
+        return "未知步骤"
+
+    def _try_open_box_labels_step(self) -> None:
+        candidates = [
+            self.page.get_by_text("Box Labels", exact=True),
+            self.page.get_by_text("箱子标签", exact=True),
+            self.page.locator("text=Box Labels"),
+            self.page.locator("text=箱子标签"),
+        ]
+        for locator in candidates:
+            try:
+                if locator.count() == 0:
+                    continue
+                target = locator.last
+                target.scroll_into_view_if_needed(timeout=2000)
+                target.click(timeout=3000, force=True)
+                self.page.wait_for_timeout(1500)
+                return
+            except Exception:
+                continue
+
+    def ensure_box_labels_ready(self, fba_code: str) -> None:
+        if self._find_shipment_cards():
+            return
+
+        self._try_open_box_labels_step()
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if self._find_shipment_cards():
+                return
+            self.page.wait_for_timeout(500)
+
+        stage = self._detect_shipment_stage()
+        if stage in {"Review/check Shipment Content", "选择发货商品", "Transportation Service", "配送服务", "Shipment Packaging", "商品装箱"}:
+            raise AutomationError(
+                "shipment_not_ready_for_box_labels",
+                f"FBA {fba_code} 已进入详情页，但当前停在“{stage}”，尚未进入 Box Labels/箱子标签步骤，不能下载装箱清单。",
+            )
+        raise AutomationError(
+            "shipment_cards_not_found",
+            f"FBA {fba_code} 已进入详情页，但未识别到 Box Labels/箱子标签中的仓库卡片或下载按钮。",
+        )
 
     def _find_shipment_cards(self) -> list[Any]:
         cards = self.page.locator("div.delivery-ship")
@@ -1548,6 +1619,7 @@ class LingxingPlaywrightAutomation:
         download_dir.mkdir(parents=True, exist_ok=True)
         self.search_shipment(fba_code)
         self.open_shipment_detail(fba_code)
+        self.ensure_box_labels_ready(fba_code)
 
         cards = self._find_shipment_cards()
         if not cards:
