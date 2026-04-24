@@ -3,7 +3,7 @@ import { AppShell } from "@/components/layout/app-shell";
 import { PrimaryButton } from "@/components/ui/primary-button";
 import { fetchJson } from "@/lib/http";
 import { readPageData } from "@/lib/page-data";
-import { CheckCircle2, CloudUpload, FileSpreadsheet, FileText, PackageCheck, ShieldCheck, Upload } from "lucide-react";
+import { AlertCircle, CheckCircle2, ClipboardList, CloudUpload, FileSpreadsheet, FileText, PackageCheck, ShieldCheck, Upload } from "lucide-react";
 import { createRoot } from "react-dom/client";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 
@@ -27,10 +27,11 @@ function NewTaskPage() {
   const exampleFiles = payload.exampleFiles ?? payload.example_files ?? [];
   const [workflow, setWorkflow] = useState(payload.workflows[0]?.name ?? "");
   const [submitter, setSubmitter] = useState("");
-  const [remark, setRemark] = useState("");
+  const [fbaText, setFbaText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [hint, setHint] = useState("");
+  const fbaCheck = useMemo(() => parseFbaTextForPreview(fbaText), [fbaText]);
 
   useEffect(() => {
     const remembered = window.localStorage.getItem("lingxing_submitter");
@@ -41,8 +42,12 @@ function NewTaskPage() {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file) {
-      setHint("请先选择清单文件");
+    if (!fbaCheck.codes.length && !file) {
+      setHint("请粘贴 FBA 号，或选择 .txt / .xlsx 清单文件");
+      return;
+    }
+    if (fbaCheck.invalid.length) {
+      setHint(`FBA号格式不正确，请先检查：${fbaCheck.invalid.slice(0, 3).join("、")}`);
       return;
     }
 
@@ -52,8 +57,11 @@ function NewTaskPage() {
       const formData = new FormData();
       formData.append("workflow_name", workflow);
       formData.append("submitter", submitter.trim());
-      formData.append("remark", remark.trim());
-      formData.append("manifest_file", file);
+      if (fbaCheck.codes.length) {
+        formData.append("fba_text", fbaCheck.codes.join("\n"));
+      } else if (file) {
+        formData.append("manifest_file", file);
+      }
       const response = await fetchJson<CreateTaskResponse>("/api/tasks", {
         method: "POST",
         body: formData,
@@ -83,8 +91,8 @@ function NewTaskPage() {
       }
       subtitle={
         <>
-          第一次用也不用记命令。按右侧 3 步准备清单，系统会自动校验 FBA、进入后台排队，
-          完成后在任务列表下载结果包。
+          第一次用也不用记命令。可以直接粘贴 FBA 号，也可以上传清单文件；系统会自动校验并排队处理，
+          完成后在任务列表下载成品 Excel。
         </>
       }
       aside={
@@ -152,15 +160,35 @@ function NewTaskPage() {
               </label>
             </div>
 
-            <label className="space-y-2">
-              <span className="text-sm font-medium text-[color:oklch(0.32_0.02_232)]">备注</span>
-              <input
-                value={remark}
-                onChange={(event) => setRemark(event.target.value)}
-                placeholder="可选，方便在任务列表里快速识别"
-                className="min-h-12 w-full rounded-2xl border border-[color:oklch(0.88_0.01_95)] bg-[color:oklch(0.99_0.002_95)] px-4 text-sm text-[color:oklch(0.28_0.02_232)] outline-none transition placeholder:text-[color:oklch(0.68_0.02_228)] focus:border-[color:oklch(0.6_0.09_190)] focus:ring-2 focus:ring-[color:oklch(0.86_0.03_190)]"
+            <section className="rounded-[28px] border border-[color:oklch(0.88_0.018_95)] bg-[linear-gradient(180deg,rgba(255,255,255,0.92),rgba(248,247,242,0.78))] p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[color:oklch(0.94_0.035_178)] text-[color:oklch(0.4_0.08_182)]">
+                    <ClipboardList className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-[color:oklch(0.24_0.02_232)]">方式一：直接粘贴 FBA 号</div>
+                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.45_0.03_228)]">
+                      一行一个，或从表格里整列复制过来。格式需类似 <span className="font-semibold text-[color:oklch(0.3_0.04_196)]">FBA19C2P8D5D</span>。
+                    </div>
+                  </div>
+                </div>
+                <FbaCheckBadge codes={fbaCheck.codes.length} invalid={fbaCheck.invalid.length} />
+              </div>
+              <textarea
+                name="fba_text"
+                value={fbaText}
+                onChange={(event) => setFbaText(event.target.value)}
+                placeholder={"例如：\nFBA19C2P8D5D\nFBA19BXBL1MT"}
+                className="mt-4 min-h-32 w-full resize-y rounded-2xl border border-[color:oklch(0.86_0.016_95)] bg-white/92 px-4 py-3 text-sm leading-6 text-[color:oklch(0.27_0.025_232)] outline-none transition placeholder:text-[color:oklch(0.67_0.02_228)] focus:border-[color:oklch(0.6_0.09_190)] focus:ring-2 focus:ring-[color:oklch(0.86_0.03_190)]"
               />
-            </label>
+              {fbaCheck.invalid.length ? (
+                <div className="mt-3 flex items-start gap-2 rounded-2xl bg-[color:oklch(0.965_0.025_35)] px-3 py-2 text-sm font-medium text-[color:oklch(0.43_0.08_35)]">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  以下内容不是有效 FBA 号：{fbaCheck.invalid.slice(0, 5).join("、")}
+                </div>
+              ) : null}
+            </section>
 
             <label className="block cursor-pointer rounded-[28px] border border-dashed border-[color:oklch(0.82_0.03_186)] bg-[linear-gradient(180deg,rgba(244,250,248,0.96),rgba(255,255,255,0.92))] p-6 transition hover:border-[color:oklch(0.62_0.08_188)]">
               <input
@@ -179,7 +207,7 @@ function NewTaskPage() {
                       选择清单文件
                     </div>
                     <div className="text-sm leading-6 text-[color:oklch(0.47_0.03_228)]">
-                      支持 `.txt` 与 `.xlsx`。如果是 Excel，系统会读取第一个工作表并自动识别 FBA 列。
+                      方式二：支持 `.txt` 与 `.xlsx`。如果上面已粘贴 FBA 号，会优先使用粘贴内容。
                     </div>
                   </div>
                 </div>
@@ -242,6 +270,55 @@ function NewTaskPage() {
         </div>
       </section>
     </AppShell>
+  );
+}
+
+function parseFbaTextForPreview(text: string): { codes: string[]; invalid: string[] } {
+  const codes: string[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    const tokens = line.match(/[A-Za-z0-9-]+/g) ?? [];
+    for (const token of tokens) {
+      const normalized = token.toUpperCase();
+      if (/^FBA[A-Z0-9-]+$/.test(normalized)) {
+        if (!seen.has(normalized)) {
+          seen.add(normalized);
+          codes.push(normalized);
+        }
+      } else {
+        invalid.push(token);
+      }
+    }
+  }
+  return { codes, invalid };
+}
+
+function FbaCheckBadge({ codes, invalid }: { codes: number; invalid: number }) {
+  if (invalid > 0) {
+    return (
+      <div className="inline-flex items-center gap-2 rounded-full bg-[color:oklch(0.965_0.025_35)] px-3 py-2 text-xs font-semibold text-[color:oklch(0.43_0.08_35)]">
+        <AlertCircle className="h-3.5 w-3.5" />
+        {invalid} 个格式待检查
+      </div>
+    );
+  }
+  if (codes > 0) {
+    return (
+      <div className="inline-flex items-center gap-2 rounded-full bg-[color:oklch(0.945_0.04_165)] px-3 py-2 text-xs font-semibold text-[color:oklch(0.32_0.06_170)]">
+        <CheckCircle2 className="h-3.5 w-3.5" />
+        已识别 {codes} 个 FBA
+      </div>
+    );
+  }
+  return (
+    <div className="inline-flex items-center gap-2 rounded-full bg-[color:oklch(0.975_0.008_95)] px-3 py-2 text-xs font-semibold text-[color:oklch(0.44_0.025_232)]">
+      等待粘贴
+    </div>
   );
 }
 

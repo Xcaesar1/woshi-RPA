@@ -25,7 +25,6 @@ type TaskDetail = {
   original_filename: string;
   workflow_label: string;
   submitter: string;
-  remark?: string | null;
   status: string;
   status_label: string;
   current_stage: string;
@@ -133,7 +132,7 @@ function TaskDetailPage() {
               className="inline-flex min-h-12 items-center justify-center rounded-full bg-[linear-gradient(135deg,oklch(0.45_0.09_164),oklch(0.58_0.08_182))] px-5 text-sm font-semibold text-white shadow-[0_14px_32px_rgba(31,92,74,0.24)] transition hover:translate-y-[-1px]"
             >
               <Download className="mr-2 h-4 w-4" />
-              下载结果包
+              下载结果
             </a>
           ) : null}
           <div className="text-sm text-[color:oklch(0.46_0.03_228)]">{hint}</div>
@@ -168,7 +167,7 @@ function TaskDetailPage() {
             className="border-[color:oklch(0.89_0.02_95)] bg-white/92 p-5 shadow-[0_18px_55px_rgba(41,59,49,0.08)]"
             icon={<UserRound className="h-5 w-5 text-[color:oklch(0.55_0.08_40)]" />}
             title={task.submitter}
-            description={task.remark || "没有备注"}
+            description="提交人"
             header={<MetricHeader label="提交人" />}
           />
           <BentoGridItem

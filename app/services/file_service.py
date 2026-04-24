@@ -65,6 +65,18 @@ def save_uploaded_manifest(upload_file, task_id: str, input_dir: Path) -> tuple[
     return upload_path, input_path, original_filename
 
 
+def save_text_manifest(fba_text: str, task_id: str, input_dir: Path) -> tuple[Path, Path, str]:
+    ensure_app_directories()
+    original_filename = "pasted_fba_manifest.txt"
+    upload_path = UPLOADS_DIR / f"{task_id}_{original_filename}"
+    input_path = input_dir / original_filename
+    normalized_lines = [line.strip().upper() for line in fba_text.splitlines() if line.strip()]
+    content = "\n".join(normalized_lines).strip() + "\n"
+    upload_path.write_text(content, encoding="utf-8")
+    input_path.write_text(content, encoding="utf-8")
+    return upload_path, input_path, original_filename
+
+
 def cleanup_submission_files(job_dir: Path, upload_path: Path | None = None) -> None:
     if upload_path and upload_path.exists():
         upload_path.unlink()
@@ -185,6 +197,55 @@ def create_result_zip(job_dir: Path, result_zip_path: Path, batch_report: dict, 
         if batch_report.get("status") != "success":
             add_directory_to_zip(archive, job_dir / "screenshots", "screenshots")
     return result_zip_path
+
+
+def collect_output_workbooks(job_dir: Path) -> list[Path]:
+    output_root = job_dir / "output"
+    if not output_root.exists():
+        return []
+    return sorted(path for path in output_root.rglob("*.xlsx") if path.is_file() and not path.name.startswith("~$"))
+
+
+def unique_archive_name(path: Path, used_names: set[str]) -> str:
+    base_name = path.name
+    if base_name not in used_names:
+        used_names.add(base_name)
+        return base_name
+
+    parent_name = sanitize_filename_part(path.parent.name)
+    candidate = f"{parent_name}_{base_name}"
+    if candidate not in used_names:
+        used_names.add(candidate)
+        return candidate
+
+    index = 2
+    while True:
+        candidate = f"{path.stem}_{index}{path.suffix}"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        index += 1
+
+
+def create_user_result_download(job_dir: Path, result_path: Path) -> Path | None:
+    ensure_app_directories()
+    output_workbooks = collect_output_workbooks(job_dir)
+    if not output_workbooks:
+        return None
+
+    if len(output_workbooks) == 1:
+        return output_workbooks[0]
+
+    if result_path.exists():
+        result_path.unlink()
+
+    folder_name = sanitize_filename_part(f"{job_dir.name}_结果文件")
+    used_names: set[str] = set()
+    with ZipFile(result_path, "w", compression=ZIP_DEFLATED) as archive:
+        for workbook in output_workbooks:
+            archive_name = unique_archive_name(workbook, used_names)
+            archive.write(workbook, arcname=str(Path(folder_name) / archive_name))
+    return result_path
 
 
 def get_example_manifest_path(name: str) -> Path | None:

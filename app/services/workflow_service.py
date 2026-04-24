@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from app.core.config import (
@@ -21,11 +22,12 @@ from app.services.file_service import (
     build_job_directories,
     cleanup_task_artifacts,
     cleanup_submission_files,
-    create_result_zip,
+    create_user_result_download,
     default_result_zip_path,
     load_json_file,
     locate_job_manifest,
     resolve_primary_result_file,
+    save_text_manifest,
     save_uploaded_manifest,
     tail_text_file,
 )
@@ -48,6 +50,10 @@ from app.services.task_service import (
     mark_task_finished,
 )
 from lingxing_rpa_runner import parse_manifest_file, run_manifest_job
+
+
+FBA_TEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9-]+")
+FBA_CODE_RE = re.compile(r"^FBA[A-Z0-9-]+$")
 
 
 def get_workflow_options() -> list[dict[str, str]]:
@@ -76,12 +82,47 @@ def list_task_views(*, submitter: str | None = None, status: str | None = None) 
     return [build_task_view(task) for task in list_tasks(submitter=submitter, status=status)]
 
 
-def create_task_submission(*, manifest_upload, workflow_name: str, submitter: str, remark: str | None) -> dict:
+def parse_fba_text_input(fba_text: str | None) -> list[str]:
+    text = (fba_text or "").strip()
+    if not text:
+        return []
+
+    fba_codes: list[str] = []
+    invalid_tokens: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens = FBA_TEXT_TOKEN_RE.findall(line)
+        for token in tokens:
+            normalized = token.upper().strip()
+            if FBA_CODE_RE.fullmatch(normalized):
+                fba_codes.append(normalized)
+            else:
+                invalid_tokens.append(token)
+
+    if invalid_tokens:
+        preview = ", ".join(invalid_tokens[:5])
+        raise ValueError(f"FBA号格式不正确，请检查：{preview}")
+    return list(dict.fromkeys(fba_codes))
+
+
+def create_task_submission(
+    *,
+    manifest_upload=None,
+    fba_text: str | None = None,
+    workflow_name: str,
+    submitter: str,
+    remark: str | None = None,
+) -> dict:
     workflow_name = validate_workflow_name(workflow_name)
     submitter = (submitter or "").strip()
     remark = (remark or "").strip() or None
     if not submitter:
         raise ValueError("提交人不能为空")
+    pasted_fba_codes = parse_fba_text_input(fba_text)
+    if not manifest_upload and not pasted_fba_codes:
+        raise ValueError("请粘贴 FBA 号，或上传 .txt / .xlsx 清单")
 
     task_id = generate_task_id()
     job_paths = build_job_directories(task_id)
@@ -92,13 +133,22 @@ def create_task_submission(*, manifest_upload, workflow_name: str, submitter: st
     log_path.touch()
 
     try:
-        upload_path, input_manifest_path, original_filename = save_uploaded_manifest(
-            manifest_upload,
-            task_id=task_id,
-            input_dir=job_paths["input"],
-        )
-        append_log_line(log_path, "任务已创建，开始校验上传清单")
-        fba_codes = parse_manifest_file(input_manifest_path)
+        if pasted_fba_codes:
+            upload_path, input_manifest_path, original_filename = save_text_manifest(
+                "\n".join(pasted_fba_codes),
+                task_id=task_id,
+                input_dir=job_paths["input"],
+            )
+            append_log_line(log_path, "任务已创建，开始校验粘贴的 FBA 号")
+            fba_codes = pasted_fba_codes
+        else:
+            upload_path, input_manifest_path, original_filename = save_uploaded_manifest(
+                manifest_upload,
+                task_id=task_id,
+                input_dir=job_paths["input"],
+            )
+            append_log_line(log_path, "任务已创建，开始校验上传清单")
+            fba_codes = parse_manifest_file(input_manifest_path)
         if not fba_codes:
             raise ValueError("清单中未解析到任何 FBA 号")
         append_log_line(log_path, f"清单校验通过，共解析到 {len(fba_codes)} 个 FBA，任务已入队")
@@ -157,11 +207,9 @@ def process_task(task: dict) -> dict:
             config_path=DEFAULT_CONFIG_PATH if DEFAULT_CONFIG_PATH.exists() else None,
             log_callback=log,
         )
-        result_zip_path = create_result_zip(
+        result_download_path = create_user_result_download(
             job_dir=job_dir,
-            result_zip_path=default_result_zip_path(task_id),
-            batch_report=batch_report,
-            log_path=log_path,
+            result_path=default_result_zip_path(task_id),
         )
         primary_result_path = resolve_primary_result_file(job_dir, batch_report)
         final_status = normalize_batch_status(batch_report.get("status"))
@@ -169,7 +217,7 @@ def process_task(task: dict) -> dict:
         mark_task_finished(
             task_id=task_id,
             status=final_status,
-            result_zip_path=str(result_zip_path),
+            result_zip_path=str(result_download_path) if result_download_path else None,
             result_primary_file=str(primary_result_path) if primary_result_path else None,
             error_message=error_message,
             total_fba_count=len(batch_report.get("fba_codes", [])),
