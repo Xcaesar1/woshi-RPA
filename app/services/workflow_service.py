@@ -11,6 +11,7 @@ from app.core.config import (
     RESULTS_DIR,
     WORKFLOW_REGISTRY,
 )
+from app.core.time_utils import format_datetime_for_display
 from app.models.task import (
     TASK_STATUS_FAILED,
     TASK_STATUS_LABELS,
@@ -54,6 +55,8 @@ from lingxing_rpa_runner import parse_manifest_file, run_manifest_job
 
 FBA_TEXT_TOKEN_RE = re.compile(r"[A-Za-z0-9-]+")
 FBA_CODE_RE = re.compile(r"^FBA[A-Z0-9-]+$")
+LOG_TIMESTAMP_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
+TASK_TIME_FIELDS = ("created_at", "queued_at", "started_at", "heartbeat_at", "finished_at")
 
 
 def get_workflow_options() -> list[dict[str, str]]:
@@ -68,6 +71,9 @@ def validate_workflow_name(workflow_name: str) -> str:
 
 def build_task_view(task: dict) -> dict:
     view = dict(task)
+    for field in TASK_TIME_FIELDS:
+        if field in view:
+            view[field] = format_datetime_for_display(view.get(field))
     status = task.get("status", TASK_STATUS_FAILED)
     view["status_label"] = TASK_STATUS_LABELS.get(status, status)
     view["workflow_label"] = WORKFLOW_REGISTRY.get(task.get("workflow_name"), WORKFLOW_REGISTRY[next(iter(WORKFLOW_REGISTRY))]).label
@@ -76,6 +82,25 @@ def build_task_view(task: dict) -> dict:
     view["detail_url"] = f"/tasks/{task['id']}"
     view["download_url"] = f"/api/tasks/{task['id']}/download"
     return view
+
+
+def is_legacy_utc_task_time(value: object) -> bool:
+    text = str(value or "")
+    if "T" not in text:
+        return False
+    timezone_part = text[19:]
+    return "+" not in timezone_part and "-" not in timezone_part and not text.endswith("Z")
+
+
+def format_recent_log_for_display(log_text: str, *, legacy_utc: bool) -> str:
+    if not legacy_utc or not log_text:
+        return log_text
+
+    def replace_match(match: re.Match[str]) -> str:
+        converted = format_datetime_for_display(match.group(1).replace(" ", "T"))
+        return f"[{converted or match.group(1)}]"
+
+    return LOG_TIMESTAMP_RE.sub(replace_match, log_text)
 
 
 def list_task_views(*, submitter: str | None = None, status: str | None = None) -> list[dict]:
@@ -274,6 +299,7 @@ def get_task_detail(task_id: str) -> dict:
     job_dir = Path(task["job_dir"])
     batch_report = load_json_file(job_dir / "reports" / "batch_report.json")
     recent_log = tail_text_file(Path(task["log_path"])) if task.get("log_path") else ""
+    recent_log = format_recent_log_for_display(recent_log, legacy_utc=is_legacy_utc_task_time(task.get("created_at")))
     recent_log_lines = [line for line in recent_log.splitlines() if line.strip()]
     current_stage = recent_log_lines[-1] if recent_log_lines else task_view["status_label"]
     fba_results = []
@@ -304,8 +330,8 @@ def get_task_detail(task_id: str) -> dict:
                 "success_count": batch_report.get("success_count") if batch_report else task.get("success_fba_count"),
                 "failed_count": batch_report.get("failed_count") if batch_report else task.get("failed_fba_count"),
                 "fba_codes": batch_report.get("fba_codes", []) if batch_report else [],
-                "started_at": batch_report.get("started_at") if batch_report else task.get("started_at"),
-                "finished_at": batch_report.get("finished_at") if batch_report else task.get("finished_at"),
+                "started_at": format_datetime_for_display(batch_report.get("started_at") if batch_report else task.get("started_at")),
+                "finished_at": format_datetime_for_display(batch_report.get("finished_at") if batch_report else task.get("finished_at")),
                 "fatal_error": (batch_report.get("fatal_error") or {}).get("error") if batch_report else None,
             },
             "fba_results": fba_results,

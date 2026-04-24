@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
 from redis import Redis
@@ -23,6 +23,7 @@ from app.core.config import (
     WORKER_POLL_INTERVAL_SECONDS,
     WORKER_HEARTBEAT_TTL_SECONDS,
 )
+from app.core.time_utils import beijing_now, beijing_now_iso, format_datetime_for_display
 
 
 @dataclass
@@ -124,7 +125,7 @@ def queue_depth() -> int:
 
 
 def record_worker_heartbeat(worker_id: str) -> str:
-    now = datetime.now().isoformat(timespec="seconds")
+    now = beijing_now_iso()
     client = get_redis_client()
     client.hset(REDIS_WORKER_HEARTBEAT_KEY, worker_id, now)
     client.expire(REDIS_WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS)
@@ -138,7 +139,7 @@ def get_worker_heartbeat_snapshot(max_age_seconds: int | None = None) -> dict[st
         return {}
 
     threshold_seconds = max_age_seconds or WORKER_HEARTBEAT_TTL_SECONDS
-    cutoff = datetime.now() - timedelta(seconds=threshold_seconds)
+    cutoff = beijing_now() - timedelta(seconds=threshold_seconds)
     alive: dict[str, str] = {}
     stale_ids: list[str] = []
     for worker_id, timestamp_text in raw.items():
@@ -147,6 +148,8 @@ def get_worker_heartbeat_snapshot(max_age_seconds: int | None = None) -> dict[st
         except ValueError:
             stale_ids.append(worker_id)
             continue
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
         if timestamp >= cutoff:
             alive[worker_id] = timestamp_text
         else:
@@ -161,7 +164,7 @@ def latest_worker_heartbeat() -> str | None:
     snapshot = get_worker_heartbeat_snapshot()
     if not snapshot:
         return None
-    return max(snapshot.values())
+    return format_datetime_for_display(max(snapshot.values()))
 
 
 def is_any_worker_alive() -> bool:

@@ -16,6 +16,7 @@ services:
       - redis
     environment: &app-env
       REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Shanghai
       PLAYWRIGHT_HEADLESS: "1"
       BROWSER_MAX_CONCURRENCY: "1"
       TASK_RETENTION_DAYS: "30"

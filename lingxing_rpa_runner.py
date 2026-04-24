@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,6 +28,15 @@ DEFAULT_LOGIN_TIMEOUT = 20
 DEFAULT_SEARCH_TIMEOUT = 30
 DOWNLOAD_STABLE_CHECK_SECONDS = 1.0
 VISIBLE_CLICKABLE_SELECTOR = "a,button,[role='button'],li,div,span,i,svg"
+BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+
+def beijing_now() -> datetime:
+    return datetime.now(BEIJING_TZ)
+
+
+def beijing_now_text() -> str:
+    return beijing_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class AutomationError(RuntimeError):
@@ -92,14 +101,14 @@ def build_download_filename(fba_code: str, index: int, warehouse_code: str, orig
 
 
 def build_timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    return beijing_now().strftime("%Y%m%d-%H%M%S")
 
 
 def json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, datetime):
-        return value.isoformat()
+        return value.astimezone(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
     raise TypeError(f"Object of type {type(value)!r} is not JSON serializable")
 
 
@@ -1692,8 +1701,8 @@ def build_batch_report(
         "resource_dir": str(resource_dir),
         "work_dir": str(work_dir),
         "config_file": str(config_path) if config_path and config_path.exists() else None,
-        "started_at": results[0]["started_at"] if results else datetime.now().isoformat(),
-        "finished_at": datetime.now().isoformat(),
+        "started_at": results[0]["started_at"] if results else beijing_now_text(),
+        "finished_at": beijing_now_text(),
         "fba_codes": fba_codes,
         "success_count": success_count,
         "failed_count": failed_count,
@@ -1732,7 +1741,7 @@ def run_single_fba(
     report: dict[str, Any] = {
         "fba_code": fba_code,
         "status": "pending",
-        "started_at": datetime.now().isoformat(),
+        "started_at": beijing_now_text(),
         "fba_root": str(fba_root),
         "downloads_dir": str(download_dir),
         "output_dir": str(output_dir),
@@ -1771,7 +1780,7 @@ def run_single_fba(
         report.update(automation.current_page_state())
         emit_log(log_callback, f"[{fba_code}] 执行失败：{report['error']}")
     finally:
-        report["finished_at"] = datetime.now().isoformat()
+        report["finished_at"] = beijing_now_text()
         final_report_path = report_path or (fba_root / "automation_report.json")
         final_report_path.parent.mkdir(parents=True, exist_ok=True)
         write_json(final_report_path, report)
