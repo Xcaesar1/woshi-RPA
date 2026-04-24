@@ -72,22 +72,23 @@ export function AppShell({
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-3">
-              <div className="inline-flex items-center gap-2 rounded-full border border-[color:oklch(0.9_0.01_95)] bg-[color:oklch(0.98_0.004_95)] px-3 py-2 text-xs font-medium text-[color:oklch(0.43_0.03_232)]">
+              <div className="inline-flex items-center gap-2 rounded-full border border-[color:oklch(0.88_0.015_95)] bg-[color:oklch(0.985_0.005_95)] px-3 py-2 text-xs font-medium text-[color:oklch(0.39_0.03_232)]">
                 <Clock3 className="h-3.5 w-3.5" />
-                单账号单浏览器执行槽，适合内网稳定排队
+                多人提交，后台按顺序稳稳处理
               </div>
-              <nav className="flex flex-wrap items-center gap-2">
+              <nav className="flex flex-wrap items-center gap-2 rounded-full border border-[color:oklch(0.9_0.01_95)] bg-white/72 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
                 {nav.map((item) => {
                   const Icon = item.icon ? navIcons[item.icon] : null;
                   return (
                     <a
                       key={item.href}
+                      aria-current={item.current ? "page" : undefined}
                       href={item.href}
                       className={cn(
-                        "inline-flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition",
+                        "inline-flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:oklch(0.65_0.08_182)]",
                         item.current
-                          ? "bg-[color:oklch(0.26_0.03_232)] text-white shadow-[0_12px_30px_rgba(25,40,51,0.18)]"
-                          : "border border-[color:oklch(0.9_0.01_95)] bg-white/90 text-[color:oklch(0.36_0.02_232)] hover:bg-[color:oklch(0.97_0.01_95)]",
+                          ? "border border-[color:oklch(0.78_0.05_182)] bg-[linear-gradient(180deg,oklch(0.965_0.035_176),oklch(0.93_0.04_188))] text-[color:oklch(0.26_0.055_196)] shadow-[0_10px_24px_rgba(42,106,99,0.14)]"
+                          : "text-[color:oklch(0.42_0.025_232)] hover:bg-[color:oklch(0.97_0.01_95)] hover:text-[color:oklch(0.26_0.04_196)]",
                       )}
                     >
                       {Icon ? <Icon className="h-4 w-4" /> : null}
@@ -123,25 +124,25 @@ export function AppShell({
             <aside className="space-y-4">
               <div className="rounded-[28px] border border-white/70 bg-white/78 p-5 shadow-[0_18px_70px_rgba(36,53,44,0.08)] backdrop-blur-xl">
                 <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
-                  操作节奏
+                  小白上手指南
                 </p>
                 <div className="mt-4 space-y-3">
-                  <div className="rounded-2xl bg-[color:oklch(0.97_0.01_92)] px-4 py-3">
-                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">步骤 1</div>
-                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
-                      上传 `.txt` 或 `.xlsx` 清单，系统立即校验并入队。
+                  <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
+                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">1. 准备清单</div>
+                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
+                      不会做表也没关系，先下载示例文件，把 FBA 号替换进去。
                     </div>
                   </div>
-                  <div className="rounded-2xl bg-[color:oklch(0.97_0.01_92)] px-4 py-3">
-                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">步骤 2</div>
-                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
-                      后台自动登录领星、下载装箱清单，并调用既有 Excel 整理规则。
+                  <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
+                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">2. 上传提交</div>
+                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
+                      选择 `.txt` 或 `.xlsx`，填写提交人，然后点“开始处理”。
                     </div>
                   </div>
-                  <div className="rounded-2xl bg-[color:oklch(0.97_0.01_92)] px-4 py-3">
-                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">步骤 3</div>
-                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
-                      完成后统一下载结果包，日志、报告和整理后的文件都在里面。
+                  <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
+                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">3. 等待下载</div>
+                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
+                      去“任务列表”看进度，显示可下载后直接拿结果包。
                     </div>
                   </div>
                 </div>

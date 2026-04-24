@@ -1,6 +1,5 @@
 import { AppShell } from "@/components/layout/app-shell";
 import { BentoGrid, BentoGridItem } from "@/components/ui/bento-grid";
-import { PointerHighlight } from "@/components/ui/pointer-highlight";
 import { PrimaryButton, SecondaryLink } from "@/components/ui/primary-button";
 import { StatusPill } from "@/components/ui/status-pill";
 import { fetchJson } from "@/lib/http";
@@ -146,26 +145,16 @@ function TaskListPage() {
         ]}
         title={
           <>
-            把排队、执行和下载状态，
+            任务列表：
             <br />
-            放到一个更容易扫读的工作台里。
+            看进度，找任务，下载结果。
           </>
         }
         subtitle={
           <>
-            页面会自动刷新，不需要反复手动点按钮。你能一眼看清当前有多少任务在排队、浏览器执行槽是否被占用、哪条任务已经可以下载结果。
+            这里会自动刷新。你只需要看状态列：排队中就等一等，运行中表示正在处理，
+            已完成或部分成功时就可以点“下载”拿结果包。
           </>
-        }
-        callout={
-          <PointerHighlight
-            rectangleClassName="rounded-full border-[color:oklch(0.73_0.03_188)]"
-            pointerClassName="text-[color:oklch(0.53_0.08_188)]"
-            containerClassName="max-w-fit rounded-full bg-white/70 px-4 py-2"
-          >
-            <span className="text-sm font-medium text-[color:oklch(0.35_0.03_230)]">
-              就算 10 台电脑同时提交，这里也只会排队，不会同时拉起 10 个浏览器。
-            </span>
-          </PointerHighlight>
         }
         actions={
           <>
@@ -183,11 +172,12 @@ function TaskListPage() {
         aside={
           <div className="rounded-[28px] border border-white/70 bg-white/78 p-5 shadow-[0_18px_70px_rgba(36,53,44,0.08)] backdrop-blur-xl">
             <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
-              观察建议
+              小白怎么看状态
             </p>
             <div className="mt-4 space-y-3 text-sm leading-6 text-[color:oklch(0.42_0.03_228)]">
-              <p>如果 `worker 在线` 正常、`执行槽` 长时间为 0，但任务没有启动，优先看 Redis 或 worker 日志。</p>
-              <p>部分成功任务也能下载结果，失败明细会一并打包，方便继续排错。</p>
+              <p>看到“排队中”：任务已经收到了，等待后台处理。</p>
+              <p>看到“运行中”：浏览器正在下载并整理 Excel。</p>
+              <p>看到“已完成 / 部分成功 / 失败”：都可以下载结果包查看明细。</p>
             </div>
           </div>
         }
@@ -352,7 +342,7 @@ function TaskListPage() {
                                 下载
                               </a>
                             ) : (
-                              <span className="inline-flex items-center rounded-full bg-[color:oklch(0.97_0.01_95)] px-3 py-2 text-sm text-[color:oklch(0.48_0.02_228)]">
+                              <span className="inline-flex items-center rounded-full border border-[color:oklch(0.88_0.012_95)] bg-[color:oklch(0.975_0.008_95)] px-3 py-2 text-sm font-medium text-[color:oklch(0.34_0.025_232)]">
                                 等待结果
                               </span>
                             )}
