@@ -18,7 +18,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="领星内网页面任务系统", lifespan=lifespan)
+app = FastAPI(title="领星自动化RPA", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(pages_router)
 app.include_router(tasks_router)
