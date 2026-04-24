@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+
+TASK_STATUS_PENDING = "PENDING"
+TASK_STATUS_QUEUED = "QUEUED"
+TASK_STATUS_RUNNING = "RUNNING"
+TASK_STATUS_SUCCESS = "SUCCESS"
+TASK_STATUS_PARTIAL_SUCCESS = "PARTIAL_SUCCESS"
+TASK_STATUS_FAILED = "FAILED"
+
+TASK_STATUS_CHOICES = [
+    TASK_STATUS_PENDING,
+    TASK_STATUS_QUEUED,
+    TASK_STATUS_RUNNING,
+    TASK_STATUS_SUCCESS,
+    TASK_STATUS_PARTIAL_SUCCESS,
+    TASK_STATUS_FAILED,
+]
+
+TERMINAL_TASK_STATUSES = {
+    TASK_STATUS_SUCCESS,
+    TASK_STATUS_PARTIAL_SUCCESS,
+    TASK_STATUS_FAILED,
+}
+
+TASK_STATUS_LABELS = {
+    TASK_STATUS_PENDING: "待创建",
+    TASK_STATUS_QUEUED: "排队中",
+    TASK_STATUS_RUNNING: "运行中",
+    TASK_STATUS_SUCCESS: "已完成",
+    TASK_STATUS_PARTIAL_SUCCESS: "部分完成",
+    TASK_STATUS_FAILED: "失败",
+}
+
+
+def normalize_batch_status(value: str | None) -> str:
+    normalized = (value or "").strip().upper()
+    if normalized in TASK_STATUS_CHOICES:
+        return normalized
+    if normalized == "PARTIAL-SUCCESS":
+        return TASK_STATUS_PARTIAL_SUCCESS
+    if normalized == "PARTIAL_SUCCESS":
+        return TASK_STATUS_PARTIAL_SUCCESS
+    if normalized == "SUCCESS":
+        return TASK_STATUS_SUCCESS
+    if normalized == "FAILED":
+        return TASK_STATUS_FAILED
+    return TASK_STATUS_FAILED

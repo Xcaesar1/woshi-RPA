@@ -1,0 +1,15 @@
+__pycache__/
+frontend/node_modules/
+app/static/ui/
+*.pyc
+.pytest_cache/
+chrome_profile/
+chrome_profile_playwright/
+chrome_profile_playwright_debug/
+chrome_profile_playwright_probe/
+runs/
+e2e_real_run*/
+task_new_render.png
+rpa.docx
+lingxing_rpa.local.json
+data/
