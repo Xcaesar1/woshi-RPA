@@ -1071,6 +1071,344 @@ def normalize_workbook_fonts(workbook) -> None:
                 apply_content_font_rule(cell)
 
 
+def read_source_metadata(source_info: SourceWorkbookInfo) -> dict[str, Any]:
+    workbook = load_workbook(source_info.path, data_only=False, rich_text=True)
+    try:
+        worksheet = workbook[source_info.selection.sheet_name]
+        return extract_metadata(worksheet, source_info.selection.header_row)
+    finally:
+        workbook.close()
+
+
+def source_name_contains_ups(metadata: dict[str, Any]) -> bool:
+    cargo_name = as_plain_text(metadata.get("货件名称"))
+    return "UPS" in cargo_name.upper()
+
+
+def build_one_sku_box_groups(
+    worksheet: Worksheet,
+    selection: WorkbookSelection,
+    source_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    current_box = 1
+    for source_row in source_rows:
+        carton_count = convert_numeric(source_row.get("箱数")) or 1
+        if not isinstance(carton_count, (int, float)) or carton_count <= 0:
+            carton_count = 1
+        carton_count = int(carton_count)
+        quantity_per_box = convert_numeric(source_row.get("单箱数量")) or convert_numeric(source_row.get("发货量")) or 0
+        raw_carton = as_plain_text(source_row.get("箱号")).rstrip("；;，,")
+        groups.append(
+            {
+                "start_box": current_box,
+                "end_box": current_box + carton_count - 1,
+                "items": [
+                    {
+                        "msku": source_row.get("MSKU"),
+                        "factory_sku": source_row.get("SKU"),
+                        "fnsku": source_row.get("FNSKU"),
+                        "quantity_per_box": quantity_per_box,
+                    }
+                ],
+                "carton_numbers": [raw_carton] if raw_carton else [],
+            }
+        )
+        current_box += carton_count
+    return groups
+
+
+def extract_ups_ticket_payload(
+    source_info: SourceWorkbookInfo,
+    ticket_index: int,
+    msku_index: dict[str, list[dict[str, Any]]],
+    store_index: dict[str, list[dict[str, Any]]],
+    anomalies: list[str],
+) -> dict[str, Any]:
+    workbook = load_workbook(source_info.path, data_only=False, rich_text=True)
+    try:
+        worksheet = workbook[source_info.selection.sheet_name]
+        metadata = extract_metadata(worksheet, source_info.selection.header_row)
+        shipment_no = metadata.get("货件单号")
+        fba_number, fba_anomaly = extract_fba_number(shipment_no)
+        if fba_anomaly:
+            anomalies.append(f"第{ticket_index}票：{fba_anomaly}")
+
+        cargo_name = metadata.get("货件名称")
+        fc_code = metadata.get("物流中心编码")
+        date_display, short_date, date_anomaly = extract_mul_shipment_date(cargo_name, source_info.path)
+        if date_anomaly:
+            anomalies.append(f"第{ticket_index}票：{date_anomaly}")
+
+        if source_info.format_type == "MUL_SKU":
+            source_rows = extract_mul_detail_rows(worksheet, source_info.selection)
+            groups = build_mul_box_groups(worksheet, source_info.selection, source_rows, source_info.box_columns)
+            quantity_header = "发货数量"
+        else:
+            source_rows = extract_detail_rows(worksheet, source_info.selection)
+            groups = build_one_sku_box_groups(worksheet, source_info.selection, source_rows)
+            quantity_header = "发货量"
+
+        if not source_rows:
+            raise ValueError(f"{source_info.path.name} 未解析到 SKU 明细行")
+        if not groups:
+            raise ValueError(f"{source_info.path.name} 未解析到有效箱信息")
+
+        lookup_results = [
+            resolve_store_lookup(
+                row_number=index,
+                msku_value=row.get("MSKU"),
+                ticket_index=ticket_index,
+                msku_index=msku_index,
+                store_index=store_index,
+                anomalies=anomalies,
+            )
+            for index, row in enumerate(source_rows, start=1)
+        ]
+        store_shorts = dedupe_preserve_order(
+            [result.store_short for result in lookup_results if not is_blank(result.store_short)]
+        )
+        store_short = store_shorts[0] if store_shorts else "UNKNOWN"
+        if len(store_shorts) > 1:
+            anomalies.append(f"第{ticket_index}票：UPS 文件存在多个店铺简称：{', '.join(store_shorts)}")
+
+        total_units = sum(
+            (convert_numeric(row.get(quantity_header)) or 0)
+            for row in source_rows
+            if isinstance(convert_numeric(row.get(quantity_header)) or 0, (int, float))
+        )
+        total_cartons = sum(group["end_box"] - group["start_box"] + 1 for group in groups)
+
+        return {
+            "source_info": source_info,
+            "source_workbook": source_info.path.name,
+            "source_sheet": source_info.selection.sheet_name,
+            "source_structure": source_info.format_type,
+            "metadata": metadata,
+            "shipment_number": fba_number,
+            "cargo_name": cargo_name,
+            "warehouse_code": fc_code,
+            "date_display": date_display,
+            "ticket_date": short_date,
+            "groups": groups,
+            "store_short": store_short,
+            "store_shorts": store_shorts,
+            "lookup_results": lookup_results,
+            "total_units": total_units,
+            "total_cartons": total_cartons,
+        }
+    finally:
+        workbook.close()
+
+
+def write_ups_packing_header(
+    worksheet: Worksheet,
+    title_row: int,
+    ticket_index: int,
+    ticket: dict[str, Any],
+) -> None:
+    header_row = title_row + 1
+    header_blank_row = title_row + 2
+    worksheet.row_dimensions[title_row].height = 77
+    worksheet.row_dimensions[header_row].height = 23
+    worksheet.row_dimensions[header_blank_row].height = 23
+
+    merge_and_style(worksheet, f"A{title_row}:G{title_row}")
+    worksheet.cell(row=title_row, column=1).value = (
+        f"装箱单（{ticket['store_short']}）第{ticket_index}票-{ticket['shipment_number'] or ''}"
+    )
+    worksheet.cell(row=title_row, column=1).font = Font(name="宋体", size=18, bold=True)
+    worksheet.cell(row=title_row, column=1).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    worksheet.cell(row=title_row, column=1).border = FULL_BORDER
+
+    worksheet.cell(row=title_row, column=8).value = f"{ticket['date_display']}\n-美西时间"
+    worksheet.cell(row=title_row, column=9).value = format_mul_warehouse_address(
+        ticket["warehouse_code"],
+        ticket["metadata"].get("配送地址"),
+    )
+    worksheet.cell(row=title_row, column=10).value = "发往美国"
+    for col_idx in range(8, 11):
+        apply_mul_cell_style(worksheet.cell(row=title_row, column=col_idx), size=15)
+
+    warehouse_cell = worksheet.cell(row=title_row, column=9)
+    warehouse_cell.fill = copy(HIGHLIGHT_FILL)
+    warehouse_cell.font = Font(
+        name=font_name_for_value(warehouse_cell.value),
+        size=12,
+        color=HIGHLIGHT_FONT_COLOR,
+    )
+
+    for col_idx, header in enumerate(MUL_OUTPUT_HEADERS, start=1):
+        cell = worksheet.cell(row=header_row, column=col_idx)
+        cell.value = header
+        apply_mul_cell_style(cell)
+        apply_mul_cell_style(worksheet.cell(row=header_blank_row, column=col_idx))
+        if col_idx <= 9:
+            merge_and_style(
+                worksheet,
+                f"{get_column_letter(col_idx)}{header_row}:{get_column_letter(col_idx)}{header_blank_row}",
+            )
+
+    fba_number = ticket["shipment_number"] or ""
+    worksheet.cell(row=header_row, column=4).value = CellRichText(
+        "箱号  ",
+        TextBlock(InlineFont(rFont="Arial", b=True, sz=12, color="FF0000"), "FBA"),
+        TextBlock(InlineFont(rFont="宋体", b=True, sz=12, color="FF0000"), f"编号\n{fba_number}"),
+    )
+    apply_mul_cell_style(worksheet.cell(row=header_row, column=4), bold=True)
+
+
+def write_ups_packing_detail_block(
+    worksheet: Worksheet,
+    start_row: int,
+    groups: list[dict[str, Any]],
+) -> tuple[int, int, int]:
+    output_row = start_row
+    output_no = 1
+    for group in groups:
+        group_start_row = output_row
+        group_box_count = group["end_box"] - group["start_box"] + 1
+        group_units_per_box = sum(convert_numeric(item["quantity_per_box"]) or 0 for item in group["items"])
+        carton_range = format_carton_range(group["carton_numbers"])
+        for item_index, item in enumerate(group["items"]):
+            worksheet.row_dimensions[output_row].height = 23 if output_row != start_row else 33
+            values = {
+                1: output_no,
+                2: item["msku"],
+                3: item["factory_sku"],
+                4: format_box_sequence(group["start_box"], group["end_box"]) if item_index == 0 else None,
+                5: (convert_numeric(item["quantity_per_box"]) or 0) * group_box_count,
+                6: group_box_count if item_index == 0 else None,
+                7: group_units_per_box if item_index == 0 else None,
+                8: item["fnsku"],
+                9: carton_range if item_index == 0 else None,
+            }
+            for col_idx in range(1, 11):
+                cell = worksheet.cell(row=output_row, column=col_idx)
+                cell.value = values.get(col_idx)
+                apply_mul_cell_style(cell)
+                if col_idx == 8 and not is_blank(cell.value):
+                    cell.fill = copy(HIGHLIGHT_FILL)
+                    cell.font = Font(
+                        name=font_name_for_value(cell.value),
+                        size=12,
+                        color=HIGHLIGHT_FONT_COLOR,
+                    )
+            output_no += 1
+            output_row += 1
+
+        if len(group["items"]) > 1:
+            for col_idx in [4, 6, 7, 9]:
+                merge_and_style(
+                    worksheet,
+                    f"{get_column_letter(col_idx)}{group_start_row}:{get_column_letter(col_idx)}{output_row - 1}",
+                )
+
+    summary_row = output_row
+    worksheet.row_dimensions[summary_row].height = 23
+    worksheet.cell(row=summary_row, column=1).value = "合计"
+    worksheet.cell(row=summary_row, column=5).value = f"=SUM(E{start_row}:E{summary_row - 1})"
+    worksheet.cell(row=summary_row, column=6).value = f"=SUM(F{start_row}:F{summary_row - 1})"
+    for col_idx in range(1, 11):
+        apply_mul_cell_style(worksheet.cell(row=summary_row, column=col_idx))
+    return output_row - start_row, summary_row, summary_row + 2
+
+
+def process_ups_packing_workbooks(
+    resource_dir: Path,
+    output_dir: Path,
+    source_infos: list[SourceWorkbookInfo],
+) -> dict[str, Any]:
+    if not source_infos:
+        raise ValueError("未提供 UPS 源文件")
+
+    msku_map_path = locate_msku_mapping_file(resource_dir)
+    store_detail_path = locate_store_detail_file(resource_dir)
+    msku_selection = find_matching_sheet(msku_map_path, MSKU_MAP_REQUIRED_HEADERS)
+    store_selection = find_matching_sheet(store_detail_path, STORE_DETAIL_REQUIRED_HEADERS)
+    msku_index = build_lookup_index(msku_map_path, msku_selection, "MSKU")
+    store_index = build_lookup_index(store_detail_path, store_selection, "店铺+站点")
+
+    anomalies: list[str] = []
+    tickets = [
+        extract_ups_ticket_payload(source_info, ticket_index, msku_index, store_index, anomalies)
+        for ticket_index, source_info in enumerate(source_infos, start=1)
+    ]
+
+    output_workbook = Workbook()
+    try:
+        worksheet = output_workbook.active
+        apply_mul_output_layout(worksheet)
+
+        total_units = sum(ticket["total_units"] for ticket in tickets)
+        total_cartons = sum(ticket["total_cartons"] for ticket in tickets)
+        total_units_display = int(total_units) if isinstance(total_units, (int, float)) and float(total_units).is_integer() else total_units
+        worksheet.title = f"共{len(tickets)}票{total_units_display}件"
+
+        block_reports: list[dict[str, Any]] = []
+        current_title_row = 1
+        for ticket_index, ticket in enumerate(tickets, start=1):
+            write_ups_packing_header(worksheet, current_title_row, ticket_index, ticket)
+            detail_count, summary_row, next_title_row = write_ups_packing_detail_block(
+                worksheet,
+                current_title_row + 3,
+                ticket["groups"],
+            )
+            block_reports.append(
+                {
+                    "ticket_index": ticket_index,
+                    "source_workbook": ticket["source_workbook"],
+                    "source_structure": ticket["source_structure"],
+                    "source_sheet": ticket["source_sheet"],
+                    "shipment_number": ticket["shipment_number"],
+                    "cargo_name": ticket["cargo_name"],
+                    "warehouse_code": ticket["warehouse_code"],
+                    "ticket_date": ticket["ticket_date"],
+                    "title_row": current_title_row,
+                    "detail_row_count": detail_count,
+                    "summary_row": summary_row,
+                    "total_units": ticket["total_units"],
+                    "total_cartons": ticket["total_cartons"],
+                    "resolved_store_shorts": ticket["store_shorts"],
+                }
+            )
+            current_title_row = next_title_row
+
+        normalize_workbook_fonts(output_workbook)
+        first_ticket = tickets[0]
+        output_path = save_workbook_with_fallback(
+            output_workbook,
+            output_dir / build_mul_output_name(first_ticket["cargo_name"], first_ticket["shipment_number"]),
+        )
+
+        report = {
+            "format_type": "UPS_PACKING",
+            "source_output_type": "UPS_PACKING",
+            "source_workbooks": [ticket["source_workbook"] for ticket in tickets],
+            "source_structures": [
+                {"source_workbook": ticket["source_workbook"], "source_structure": ticket["source_structure"]}
+                for ticket in tickets
+            ],
+            "ticket_count": len(tickets),
+            "total_units": total_units,
+            "total_cartons": total_cartons,
+            "block_reports": block_reports,
+            "styling_updates": {
+                "warehouse_address": "黄色底红字12号",
+                "barcode_column": "黄色底红字",
+                "content_font_rule": "含中文宋体；不含中文 Arial",
+            },
+            "anomalies": dedupe_preserve_order(anomalies),
+            "output_workbook": output_path.name,
+        }
+        report_path = output_path.with_name(f"{output_path.stem}_report.json")
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        report["report_file"] = report_path.name
+        return report
+    finally:
+        output_workbook.close()
+
+
 def font_matches_content_rule(cell, *, expected_size: int | None = None) -> bool:
     size_ok = True
     if expected_size is not None:
@@ -1745,18 +2083,50 @@ def process_workbooks(resource_dir: Path, source_dir: Path, output_dir: Path) ->
 
     classified_files: list[SourceWorkbookInfo] = []
     unknown_files: list[Path] = []
+    source_metadata: dict[Path, dict[str, Any]] = {}
     for source_path in source_files:
         source_info = classify_source_workbook(source_path)
         if source_info is None:
             unknown_files.append(source_path)
         else:
             classified_files.append(source_info)
+            source_metadata[source_info.path] = read_source_metadata(source_info)
 
-    one_sku_files = [info.path for info in classified_files if info.format_type == "ONE_SKU"]
-    mul_sku_infos = [info for info in classified_files if info.format_type == "MUL_SKU"]
+    ups_infos = [
+        info
+        for info in classified_files
+        if source_name_contains_ups(source_metadata.get(info.path, {}))
+    ]
+    freight_one_sku_files = [
+        info.path
+        for info in classified_files
+        if info not in ups_infos and info.format_type == "ONE_SKU"
+    ]
+    unsupported_non_ups_infos = [
+        info
+        for info in classified_files
+        if info not in ups_infos and info.format_type != "ONE_SKU"
+    ]
 
-    if one_sku_files and not mul_sku_infos and not unknown_files:
-        return process_one_sku_workbooks(resource_dir, source_dir, output_dir, source_files=one_sku_files)
+    if freight_one_sku_files and not ups_infos and not unknown_files and not unsupported_non_ups_infos:
+        report = process_one_sku_workbooks(resource_dir, source_dir, output_dir, source_files=freight_one_sku_files)
+        report["source_output_type"] = "FREIGHT_INFO"
+        report["source_file_formats"] = [
+            {
+                "source_workbook": info.path.name,
+                "source_structure": info.format_type,
+                "source_output_type": "FREIGHT_INFO",
+                "cargo_name": source_metadata.get(info.path, {}).get("货件名称"),
+            }
+            for info in classified_files
+        ]
+        for item in report.get("processing_output_files", []):
+            item["source_output_type"] = "FREIGHT_INFO"
+            item["source_structure"] = "ONE_SKU"
+        report_file = report.get("report_file")
+        if report_file:
+            (output_dir / str(report_file)).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return report
 
     output_files: list[dict[str, Any]] = []
     child_reports: list[dict[str, Any]] = []
@@ -1765,48 +2135,54 @@ def process_workbooks(resource_dir: Path, source_dir: Path, output_dir: Path) ->
     if unknown_files:
         anomalies.extend([f"无法识别源文件格式，已跳过：{path.name}" for path in unknown_files])
 
-    if one_sku_files:
-        one_report = process_one_sku_workbooks(resource_dir, source_dir, output_dir, source_files=one_sku_files)
+    if unsupported_non_ups_infos:
+        anomalies.extend(
+            [
+                f"非 UPS 源文件不是第一种单款箱结构，已跳过：{info.path.name}"
+                for info in unsupported_non_ups_infos
+            ]
+        )
+
+    if freight_one_sku_files:
+        one_report = process_one_sku_workbooks(resource_dir, source_dir, output_dir, source_files=freight_one_sku_files)
         child_reports.append(one_report)
         output_files.append(
             {
-                "format_type": "ONE_SKU",
+                "format_type": "FREIGHT_INFO",
+                "source_output_type": "FREIGHT_INFO",
                 "output_workbook": one_report.get("output_workbook"),
                 "report_file": one_report.get("report_file"),
-                "source_workbooks": [path.name for path in one_sku_files],
-                "ticket_count": len(one_sku_files),
+                "source_workbooks": [path.name for path in freight_one_sku_files],
+                "ticket_count": len(freight_one_sku_files),
             }
         )
         anomalies.extend(one_report.get("anomalies", []))
 
-    if mul_sku_infos:
-        msku_map_path = locate_msku_mapping_file(resource_dir)
-        store_detail_path = locate_store_detail_file(resource_dir)
-        msku_selection = find_matching_sheet(msku_map_path, MSKU_MAP_REQUIRED_HEADERS)
-        store_selection = find_matching_sheet(store_detail_path, STORE_DETAIL_REQUIRED_HEADERS)
-        msku_index = build_lookup_index(msku_map_path, msku_selection, "MSKU")
-        store_index = build_lookup_index(store_detail_path, store_selection, "店铺+站点")
-
-        for source_info in mul_sku_infos:
-            mul_report = process_mul_sku_workbook(resource_dir, output_dir, source_info, msku_index, store_index)
-            child_reports.append(mul_report)
-            output_files.append(
-                {
-                    "format_type": "MUL_SKU",
-                    "output_workbook": mul_report.get("output_workbook"),
-                    "report_file": mul_report.get("report_file"),
-                    "source_workbooks": [source_info.path.name],
-                    "total_units": mul_report.get("total_units"),
-                    "total_cartons": mul_report.get("total_cartons"),
-                }
-            )
-            anomalies.extend(mul_report.get("anomalies", []))
+    if ups_infos:
+        ups_report = process_ups_packing_workbooks(resource_dir, output_dir, ups_infos)
+        child_reports.append(ups_report)
+        output_files.append(
+            {
+                "format_type": "UPS_PACKING",
+                "source_output_type": "UPS_PACKING",
+                "output_workbook": ups_report.get("output_workbook"),
+                "report_file": ups_report.get("report_file"),
+                "source_workbooks": [info.path.name for info in ups_infos],
+                "ticket_count": len(ups_infos),
+                "total_units": ups_report.get("total_units"),
+                "total_cartons": ups_report.get("total_cartons"),
+            }
+        )
+        anomalies.extend(ups_report.get("anomalies", []))
 
     if not output_files:
         skipped_names = ", ".join(path.name for path in unknown_files) or "无"
         raise ValueError(f"未生成任何输出文件；无法识别或不可处理的源文件：{skipped_names}")
 
     primary_output = next((item.get("output_workbook") for item in output_files if item.get("output_workbook")), None)
+    output_types = dedupe_preserve_order(
+        [item.get("source_output_type") for item in output_files if item.get("source_output_type")]
+    )
     report = {
         "files_read": {
             "resource_dir": str(resource_dir),
@@ -1815,22 +2191,31 @@ def process_workbooks(resource_dir: Path, source_dir: Path, output_dir: Path) ->
             "source_workbooks": [path.name for path in source_files],
         },
         "source_file_formats": [
-            {"source_workbook": info.path.name, "format_type": info.format_type}
+            {
+                "source_workbook": info.path.name,
+                "source_structure": info.format_type,
+                "source_output_type": "UPS_PACKING"
+                if info in ups_infos
+                else ("FREIGHT_INFO" if info.path in freight_one_sku_files else "UNSUPPORTED"),
+                "cargo_name": source_metadata.get(info.path, {}).get("货件名称"),
+            }
             for info in classified_files
         ]
         + [
-            {"source_workbook": path.name, "format_type": "UNKNOWN"}
+            {"source_workbook": path.name, "source_structure": "UNKNOWN", "source_output_type": "UNKNOWN"}
             for path in unknown_files
         ],
         "child_reports": [
             {
                 "format_type": child.get("format_type", "ONE_SKU"),
+                "source_output_type": child.get("source_output_type"),
                 "output_workbook": child.get("output_workbook"),
                 "report_file": child.get("report_file"),
             }
             for child in child_reports
         ],
         "processing_output_files": output_files,
+        "source_output_type": output_types[0] if len(output_types) == 1 else "MIXED",
         "anomalies": dedupe_preserve_order(anomalies),
         "output_workbook": primary_output,
     }
