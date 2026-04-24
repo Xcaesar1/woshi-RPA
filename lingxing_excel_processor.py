@@ -677,29 +677,60 @@ def resolve_store_lookup(
         anomalies.append(f"第 {row_number} 行：MSKU 在 MSKU对应品线表.xlsx 中找不到：{msku_text}")
         return StoreLookupResult(row_number, msku_text, None, None, None, None, None, None, False)
 
+    selected_msku_match = msku_matches[0]
+    selected_store_match: dict[str, Any] | None = None
     if len(msku_matches) > 1:
-        anomalies.append(f"第 {row_number} 行：MSKU 在 MSKU对应品线表.xlsx 中匹配到多条记录：{msku_text}")
-        return StoreLookupResult(row_number, msku_text, None, None, None, None, None, None, False)
+        equivalent_candidates: list[tuple[tuple[str | None, str | None, str | None], dict[str, Any], dict[str, Any]]] = []
+        for msku_match in msku_matches:
+            candidate_line_raw = msku_match.get("品线")
+            candidate_line = None if is_blank(candidate_line_raw) else str(candidate_line_raw).strip()
+            candidate_store_site_raw = msku_match.get("店铺")
+            candidate_store_site = None if is_blank(candidate_store_site_raw) else str(candidate_store_site_raw).strip()
+            if is_blank(candidate_store_site):
+                continue
 
-    mapped_line_raw = msku_matches[0].get("品线")
+            candidate_store_matches = store_index.get(normalize_lookup_key(candidate_store_site), [])
+            if len(candidate_store_matches) != 1:
+                continue
+
+            candidate_store = candidate_store_matches[0]
+            candidate_store_name_raw = candidate_store.get("店铺")
+            candidate_store_short_raw = candidate_store.get("店铺简称")
+            candidate_store_name = None if is_blank(candidate_store_name_raw) else str(candidate_store_name_raw).strip()
+            candidate_store_short = None if is_blank(candidate_store_short_raw) else str(candidate_store_short_raw).strip()
+            signature = (candidate_store_short, candidate_store_name, candidate_line)
+            equivalent_candidates.append((signature, msku_match, candidate_store))
+
+        equivalent_signatures = dedupe_preserve_order([item[0] for item in equivalent_candidates])
+        if len(equivalent_signatures) == 1:
+            selected_msku_match = equivalent_candidates[0][1]
+            selected_store_match = equivalent_candidates[0][2]
+        else:
+            anomalies.append(f"第 {row_number} 行：MSKU 在 MSKU对应品线表.xlsx 中匹配到多条记录且解析结果不一致：{msku_text}")
+            return StoreLookupResult(row_number, msku_text, None, None, None, None, None, None, False)
+
+    mapped_line_raw = selected_msku_match.get("品线")
     mapped_line = None if is_blank(mapped_line_raw) else str(mapped_line_raw).strip()
-    store_site_value = msku_matches[0].get("店铺")
+    store_site_value = selected_msku_match.get("店铺")
     store_site_text = None if is_blank(store_site_value) else str(store_site_value).strip()
     if is_blank(store_site_text):
         anomalies.append(f"第 {row_number} 行：MSKU 对应的店铺字段为空：{msku_text}")
         return StoreLookupResult(row_number, msku_text, None, None, None, mapped_line, None, None, False)
 
-    store_matches = store_index.get(normalize_lookup_key(store_site_text), [])
-    if not store_matches:
-        anomalies.append(f"第 {row_number} 行：店铺明细表.xlsx 中找不到对应店铺+站点：{store_site_text}")
-        return StoreLookupResult(row_number, msku_text, store_site_text, None, None, mapped_line, None, None, False)
+    if selected_store_match is None:
+        store_matches = store_index.get(normalize_lookup_key(store_site_text), [])
+        if not store_matches:
+            anomalies.append(f"第 {row_number} 行：店铺明细表.xlsx 中找不到对应店铺+站点：{store_site_text}")
+            return StoreLookupResult(row_number, msku_text, store_site_text, None, None, mapped_line, None, None, False)
 
-    if len(store_matches) > 1:
-        anomalies.append(f"第 {row_number} 行：店铺明细表.xlsx 中店铺+站点匹配到多条记录：{store_site_text}")
-        return StoreLookupResult(row_number, msku_text, store_site_text, None, None, mapped_line, None, None, False)
+        if len(store_matches) > 1:
+            anomalies.append(f"第 {row_number} 行：店铺明细表.xlsx 中店铺+站点匹配到多条记录：{store_site_text}")
+            return StoreLookupResult(row_number, msku_text, store_site_text, None, None, mapped_line, None, None, False)
 
-    store_name_raw = store_matches[0].get("店铺")
-    store_short_raw = store_matches[0].get("店铺简称")
+        selected_store_match = store_matches[0]
+
+    store_name_raw = selected_store_match.get("店铺")
+    store_short_raw = selected_store_match.get("店铺简称")
     store_name = None if is_blank(store_name_raw) else str(store_name_raw).strip()
     store_short = None if is_blank(store_short_raw) else str(store_short_raw).strip()
     brand_name = format_store_brand(store_name)
