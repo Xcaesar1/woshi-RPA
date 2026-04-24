@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import datetime
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from app.core.time_utils import beijing_now_display
 from app.core.config import (
     EXAMPLE_MANIFESTS,
     JOBS_DIR,
@@ -21,7 +21,7 @@ ALLOWED_MANIFEST_SUFFIXES = {".txt", ".xlsx"}
 
 
 def now_display() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return beijing_now_display()
 
 
 def sanitize_upload_name(filename: str) -> str:

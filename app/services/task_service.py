@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timedelta
 
+from app.core.time_utils import beijing_now_iso, beijing_task_id_timestamp, beijing_threshold_iso
 from app.core.db import get_connection, row_to_dict
 from app.models.task import (
     TASK_STATUS_FAILED,
@@ -14,11 +14,11 @@ from app.models.task import (
 
 
 def iso_now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return beijing_now_iso()
 
 
 def generate_task_id() -> str:
-    return f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+    return f"{beijing_task_id_timestamp()}-{secrets.token_hex(3)}"
 
 
 def create_task(
@@ -235,7 +235,7 @@ def mark_task_failed(task_id: str, error_message: str) -> None:
 
 
 def reset_stale_running_tasks(timeout_seconds: int) -> list[str]:
-    threshold = (datetime.now() - timedelta(seconds=timeout_seconds)).isoformat(timespec="seconds")
+    threshold = beijing_threshold_iso(seconds=timeout_seconds)
     stale_ids: list[str] = []
     with get_connection() as connection:
         rows = connection.execute(
@@ -265,7 +265,7 @@ def reset_stale_running_tasks(timeout_seconds: int) -> list[str]:
 
 
 def list_expired_terminal_tasks(retention_days: int) -> list[dict]:
-    threshold = (datetime.now() - timedelta(days=retention_days)).isoformat(timespec="seconds")
+    threshold = beijing_threshold_iso(days=retention_days)
     placeholders = ",".join(["?"] * len(TERMINAL_TASK_STATUSES))
     params = [*sorted(TERMINAL_TASK_STATUSES), threshold]
     with get_connection() as connection:
