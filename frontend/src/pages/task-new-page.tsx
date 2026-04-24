@@ -1,10 +1,9 @@
 import { BentoGrid, BentoGridItem } from "@/components/ui/bento-grid";
-import { PointerHighlight } from "@/components/ui/pointer-highlight";
 import { AppShell } from "@/components/layout/app-shell";
 import { PrimaryButton } from "@/components/ui/primary-button";
 import { fetchJson } from "@/lib/http";
 import { readPageData } from "@/lib/page-data";
-import { CloudUpload, FileSpreadsheet, FileText, PackageCheck, ShieldCheck, Upload } from "lucide-react";
+import { CheckCircle2, CloudUpload, FileSpreadsheet, FileText, PackageCheck, ShieldCheck, Upload } from "lucide-react";
 import { createRoot } from "react-dom/client";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 
@@ -77,37 +76,32 @@ function NewTaskPage() {
       ]}
       title={
         <>
-          把原来“命令行操作”的那条链路，
+          小白上手指南：
           <br />
-          收敛成同事也能直接上手的上传页面。
+          选文件，点提交，等结果。
         </>
       }
       subtitle={
         <>
-          支持上传 `.txt` 和 `.xlsx` 清单，系统会自动解析 FBA、进入后台排队，并在完成后生成可下载的结果包。
-          整体风格更偏内网工具里的“高级实用派”，重点是稳、清晰、好操作。
+          第一次用也不用记命令。按右侧 3 步准备清单，系统会自动校验 FBA、进入后台排队，
+          完成后在任务列表下载结果包。
         </>
-      }
-      callout={
-        <PointerHighlight
-          rectangleClassName="rounded-full border-[color:oklch(0.73_0.03_188)]"
-          pointerClassName="text-[color:oklch(0.53_0.08_188)]"
-          containerClassName="max-w-fit rounded-full bg-white/70 px-4 py-2"
-        >
-          <span className="text-sm font-medium text-[color:oklch(0.35_0.03_230)]">
-            当前模式是“多人可提交，浏览器执行始终保持单槽稳定运行”。
-          </span>
-        </PointerHighlight>
       }
       aside={
         <div className="rounded-[28px] border border-white/70 bg-white/78 p-5 shadow-[0_18px_70px_rgba(36,53,44,0.08)] backdrop-blur-xl">
           <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
-            适合谁用
+            不容易出错的做法
           </p>
-          <div className="mt-4 space-y-3 text-sm leading-6 text-[color:oklch(0.42_0.03_228)]">
-            <p>适合内网同事按模板上传，无需再手工打开命令行。</p>
-            <p>上传后可以关闭页面，稍后再回来查看排队状态和下载结果。</p>
-            <p>每个任务都独立保留日志、报告和结果包，排错比以前直观很多。</p>
+          <div className="mt-4 space-y-3">
+            {["先用示例文件改 FBA 号", "提交人写真实姓名，方便筛选", "提交后去任务列表看状态"].map((item) => (
+              <div
+                key={item}
+                className="flex items-center gap-3 rounded-2xl bg-[color:oklch(0.975_0.012_92)] px-4 py-3 text-sm font-medium text-[color:oklch(0.35_0.03_228)]"
+              >
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-[color:oklch(0.52_0.08_176)]" />
+                {item}
+              </div>
+            ))}
           </div>
         </div>
       }
