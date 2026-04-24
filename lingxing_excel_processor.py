@@ -12,7 +12,7 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.cell.rich_text import CellRichText, InlineFont, TextBlock
-from openpyxl.styles import Alignment, Border, Font, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
@@ -107,6 +107,7 @@ PRODUCT_LINE_KEYWORDS = {
 BOX_RANGE_RE = re.compile(r"(\d+)\s*[～~\-－—–至]+\s*(\d+)\s*$")
 BOX_SINGLE_RE = re.compile(r"(\d+)\s*$")
 DATE_IN_FILENAME_RE = re.compile(r"_(\d{8})(?:[-_]|$)")
+CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 THIN_SIDE = Side(style="thin", color="000000")
 FULL_BORDER = Border(left=THIN_SIDE, right=THIN_SIDE, top=THIN_SIDE, bottom=THIN_SIDE)
 HEADER_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -114,6 +115,10 @@ TITLE_ALIGNMENT = Alignment(horizontal="center", vertical="center")
 HEADER_FBA_FONT = InlineFont(rFont="宋体", b=True, sz=14, color="FF0000")
 DATA_FONT = Font(name="宋体", size=12)
 TITLE_FONT = Font(name="宋体", size=20)
+ASCII_FONT_NAME = "Arial"
+CJK_FONT_NAME = "宋体"
+HIGHLIGHT_FILL = PatternFill(fill_type="solid", fgColor="FFFF00")
+HIGHLIGHT_FONT_COLOR = "FF0000"
 DATA_ROW_HEIGHT = 30
 HEADER_ROW_HEIGHT = 20
 OUTPUT_COLUMN_WIDTHS = {
@@ -690,7 +695,7 @@ def apply_data_cell_style(cell) -> None:
     wrap_text = bool(cell.alignment.wrapText) if cell.alignment else False
     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=wrap_text)
     cell.border = FULL_BORDER
-    cell.font = copy(DATA_FONT)
+    cell.font = Font(name=font_name_for_value(cell.value), size=12)
 
 
 def apply_data_row_style(worksheet: Worksheet, row_idx: int, max_col: int) -> None:
@@ -994,7 +999,7 @@ def build_mul_box_groups(
 
 
 def apply_mul_cell_style(cell, *, bold: bool = False, size: int = 12, wrap: bool = True) -> None:
-    cell.font = Font(name="宋体", size=size, bold=bold)
+    cell.font = Font(name=font_name_for_value(cell.value), size=size, bold=bold)
     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=wrap)
     cell.border = FULL_BORDER
 
@@ -1010,6 +1015,67 @@ def apply_mul_output_layout(worksheet: Worksheet) -> None:
 def merge_and_style(worksheet: Worksheet, cell_range: str) -> None:
     ensure_merge_range(worksheet, cell_range)
     sync_merged_range_borders(worksheet, cell_range)
+
+
+def contains_cjk(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, CellRichText):
+        text = "".join(str(part) for part in value)
+    else:
+        text = str(value)
+    return bool(CJK_RE.search(text))
+
+
+def font_name_for_value(value: Any) -> str:
+    return CJK_FONT_NAME if contains_cjk(value) else ASCII_FONT_NAME
+
+
+def clone_font(
+    source_font: Font,
+    *,
+    name: str | None = None,
+    size: int | float | None = None,
+    color: str | None = None,
+    bold: bool | None = None,
+) -> Font:
+    return Font(
+        name=name if name is not None else source_font.name,
+        sz=size if size is not None else source_font.sz,
+        b=bold if bold is not None else source_font.b,
+        i=source_font.i,
+        u=source_font.u,
+        strike=source_font.strike,
+        color=color if color is not None else copy(source_font.color),
+        vertAlign=source_font.vertAlign,
+        charset=source_font.charset,
+        family=source_font.family,
+        scheme=source_font.scheme,
+        outline=source_font.outline,
+        shadow=source_font.shadow,
+        condense=source_font.condense,
+        extend=source_font.extend,
+    )
+
+
+def apply_content_font_rule(cell, *, size: int | float | None = None, color: str | None = None) -> None:
+    cell.font = clone_font(cell.font, name=font_name_for_value(cell.value), size=size, color=color)
+
+
+def normalize_workbook_fonts(workbook) -> None:
+    for worksheet in workbook.worksheets:
+        for row in worksheet.iter_rows():
+            for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
+                apply_content_font_rule(cell)
+
+
+def font_matches_content_rule(cell, *, expected_size: int | None = None) -> bool:
+    size_ok = True
+    if expected_size is not None:
+        size_ok = int(round((cell.font.sz or 0))) == expected_size
+    return cell.font.name == font_name_for_value(cell.value) and size_ok
 
 
 def process_mul_sku_workbook(
@@ -1084,6 +1150,13 @@ def process_mul_sku_workbook(
         worksheet["J1"] = "发往美国"
         for col_idx in range(8, 11):
             apply_mul_cell_style(worksheet.cell(row=1, column=col_idx), size=15)
+        warehouse_cell = worksheet["I1"]
+        warehouse_cell.fill = copy(HIGHLIGHT_FILL)
+        warehouse_cell.font = Font(
+            name=font_name_for_value(warehouse_cell.value),
+            size=12,
+            color=HIGHLIGHT_FONT_COLOR,
+        )
 
         for col_idx, header in enumerate(MUL_OUTPUT_HEADERS, start=1):
             cell = worksheet.cell(row=2, column=col_idx)
@@ -1124,6 +1197,13 @@ def process_mul_sku_workbook(
                     cell = worksheet.cell(row=output_row, column=col_idx)
                     cell.value = values.get(col_idx)
                     apply_mul_cell_style(cell)
+                    if col_idx == 8 and not is_blank(cell.value):
+                        cell.fill = copy(HIGHLIGHT_FILL)
+                        cell.font = Font(
+                            name=font_name_for_value(cell.value),
+                            size=12,
+                            color=HIGHLIGHT_FONT_COLOR,
+                        )
                 output_no += 1
                 output_row += 1
 
@@ -1142,6 +1222,7 @@ def process_mul_sku_workbook(
         for col_idx in range(1, 11):
             apply_mul_cell_style(worksheet.cell(row=summary_row, column=col_idx))
 
+        normalize_workbook_fonts(output_workbook)
         output_path = save_workbook_with_fallback(output_workbook, output_dir / build_mul_output_name(cargo_name, fba_number))
         report = {
             "format_type": "MUL_SKU",
@@ -1393,6 +1474,7 @@ def process_one_sku_workbooks(
             anomalies.append(f"整个输出文件存在多个品线：{', '.join(deduped_mapped_lines)}")
 
         preferred_output_path = output_dir / build_output_name(filename_store_short, filename_mapped_line, ticket_date_for_filename)
+        normalize_workbook_fonts(template_workbook)
         output_path = save_workbook_with_fallback(template_workbook, preferred_output_path)
 
         written_workbook = load_workbook(output_path, data_only=False, rich_text=True)
@@ -1502,8 +1584,7 @@ def process_one_sku_workbooks(
                     for col_idx in range(1, target_max_col + 1)
                 )
                 added_cells_font_ok = added_cells_font_ok and all(
-                    written_sheet.cell(row=row_idx, column=col_idx).font.name == "宋体"
-                    and int(round((written_sheet.cell(row=row_idx, column=col_idx).font.sz or 0))) == 12
+                    font_matches_content_rule(written_sheet.cell(row=row_idx, column=col_idx), expected_size=12)
                     for row_idx in styled_rows
                     for col_idx in range(1, target_max_col + 1)
                 )
@@ -1547,7 +1628,7 @@ def process_one_sku_workbooks(
             "all_header_borders_complete": block_header_border_ok,
             "added_cells_centered": added_cells_centered,
             "added_cells_bordered": added_cells_bordered,
-            "added_cells_songti_12": added_cells_font_ok,
+            "added_cells_content_font_rule_12": added_cells_font_ok,
             "added_rows_height_30": added_rows_height_ok,
         }
 
@@ -1583,8 +1664,8 @@ def process_one_sku_workbooks(
             anomalies.append("存在未居中的新增数据单元格")
         if not validations["added_cells_bordered"]:
             anomalies.append("存在未添加边框的新增数据单元格")
-        if not validations["added_cells_songti_12"]:
-            anomalies.append("存在未设置为宋体 12 号的新增数据单元格")
+        if not validations["added_cells_content_font_rule_12"]:
+            anomalies.append("存在未按“含中文宋体、不含中文Arial”规则设置 12 号字体的新增数据单元格")
         if not validations["added_rows_height_30"]:
             anomalies.append("存在行高不是 30 磅的新增数据行")
 
@@ -1628,7 +1709,7 @@ def process_one_sku_workbooks(
                 "box_value_prefix": "编号",
                 "title_format": "装箱单（店铺简称-站点）海运第x票",
                 "box_header_extra_line": "每票块显示对应FBA号",
-                "added_data_font": "宋体 12",
+                "added_data_font": "含中文宋体 12；不含中文 Arial 12",
                 "added_row_height": DATA_ROW_HEIGHT,
                 "summary_row_added": True,
             },
