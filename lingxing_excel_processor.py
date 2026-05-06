@@ -934,6 +934,22 @@ def format_carton_range(box_numbers: list[str]) -> str | None:
     return f"{clean_numbers[0]}-{clean_numbers[-1]}"
 
 
+def find_mul_carton_number_row(worksheet: Worksheet, selection: WorkbookSelection, box_columns: list[tuple[int, int]]) -> int:
+    search_start = selection.header_row + 1
+    search_end = min(worksheet.max_row, selection.header_row + 20)
+    box_column_indices = [col_idx for _, col_idx in box_columns]
+
+    for row_idx in range(search_start, search_end + 1):
+        for col_idx in range(1, worksheet.max_column + 1):
+            if normalize_header(worksheet.cell(row=row_idx, column=col_idx).value) != "箱号":
+                continue
+            if any(not is_blank(worksheet.cell(row=row_idx, column=box_col).value) for box_col in box_column_indices):
+                return row_idx
+
+    # Legacy fallback for older exports whose footer rows had a fixed offset.
+    return selection.header_row + 8
+
+
 def same_mul_box_signature(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
     return [
         (item["msku"], item["factory_sku"], item["fnsku"], item["quantity_per_box"])
@@ -950,7 +966,7 @@ def build_mul_box_groups(
     source_rows: list[dict[str, Any]],
     box_columns: list[tuple[int, int]],
 ) -> list[dict[str, Any]]:
-    carton_number_row = selection.header_row + 9
+    carton_number_row = find_mul_carton_number_row(worksheet, selection, box_columns)
     groups: list[dict[str, Any]] = []
     current_group: dict[str, Any] | None = None
     previous_primary_msku: Any = None
