@@ -17,6 +17,9 @@ import { createRoot } from "react-dom/client";
 
 type TaskView = {
   id: string;
+  task_display_id: string;
+  internal_task_id: string;
+  fba_codes: string[];
   original_filename: string;
   workflow_label: string;
   submitter: string;
@@ -293,7 +296,7 @@ function TaskListPage() {
               <table className="min-w-full border-collapse">
                 <thead>
                   <tr className="bg-[color:oklch(0.985_0.003_95)] text-left text-xs uppercase tracking-[0.14em] text-[color:oklch(0.55_0.02_228)]">
-                    <th className="px-6 py-4 font-semibold">任务编号</th>
+                    <th className="px-6 py-4 font-semibold">FBA号</th>
                     <th className="px-6 py-4 font-semibold">文件</th>
                     <th className="px-6 py-4 font-semibold">流程</th>
                     <th className="px-6 py-4 font-semibold">提交人</th>
@@ -313,7 +316,9 @@ function TaskListPage() {
                   ) : (
                     tasks.map((task) => (
                       <tr key={task.id} className="border-t border-[color:oklch(0.93_0.008_95)] align-top">
-                        <td className="px-6 py-5 text-sm font-medium text-[color:oklch(0.26_0.02_232)]">{task.id}</td>
+                        <td className="px-6 py-5 text-sm font-semibold text-[color:oklch(0.26_0.02_232)]">
+                          {task.task_display_id || task.id}
+                        </td>
                         <td className="px-6 py-5 text-sm text-[color:oklch(0.33_0.02_232)]">{task.original_filename}</td>
                         <td className="px-6 py-5 text-sm text-[color:oklch(0.46_0.03_228)]">{task.workflow_label}</td>
                         <td className="px-6 py-5 text-sm text-[color:oklch(0.33_0.02_232)]">{task.submitter}</td>

@@ -81,7 +81,37 @@ def build_task_view(task: dict) -> dict:
     view["can_download"] = bool(result_zip_path and Path(result_zip_path).exists() and status in TERMINAL_TASK_STATUSES)
     view["detail_url"] = f"/tasks/{task['id']}"
     view["download_url"] = f"/api/tasks/{task['id']}/download"
+    fba_codes = resolve_task_fba_codes(task)
+    view["fba_codes"] = fba_codes
+    view["task_display_id"] = format_task_display_id(fba_codes, fallback=task["id"])
+    view["internal_task_id"] = task["id"]
     return view
+
+
+def resolve_task_fba_codes(task: dict) -> list[str]:
+    job_dir_value = task.get("job_dir")
+    if not job_dir_value:
+        return []
+
+    job_dir = Path(job_dir_value)
+    batch_report = load_json_file(job_dir / "reports" / "batch_report.json")
+    report_codes = batch_report.get("fba_codes", []) if batch_report else []
+    if report_codes:
+        return [str(code).strip().upper() for code in report_codes if str(code).strip()]
+
+    try:
+        manifest_path = locate_job_manifest(job_dir)
+        return parse_manifest_file(manifest_path)
+    except Exception:
+        return []
+
+
+def format_task_display_id(fba_codes: list[str], *, fallback: str) -> str:
+    if not fba_codes:
+        return fallback
+    if len(fba_codes) == 1:
+        return fba_codes[0]
+    return f"{fba_codes[0]} 等 {len(fba_codes)} 个"
 
 
 def is_legacy_utc_task_time(value: object) -> bool:
