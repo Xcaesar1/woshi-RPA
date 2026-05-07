@@ -21,6 +21,9 @@ type FbaResult = {
 
 type TaskDetail = {
   id: string;
+  task_display_id: string;
+  internal_task_id: string;
+  fba_codes: string[];
   original_filename: string;
   workflow_label: string;
   submitter: string;
@@ -107,10 +110,10 @@ function TaskDetailPage() {
       callout={
         <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-[color:oklch(0.76_0.025_188)] bg-white/82 px-4 py-2 shadow-[0_12px_30px_rgba(42,70,64,0.08)]">
           <span className="h-2 w-2 shrink-0 rounded-full bg-[color:oklch(0.54_0.09_182)] shadow-[0_0_0_4px_color-mix(in_oklch,oklch(0.54_0.09_182)_16%,transparent)]" />
-          <span className="shrink-0 text-sm font-medium text-[color:oklch(0.38_0.03_230)]">当前任务编号</span>
+          <span className="shrink-0 text-sm font-medium text-[color:oklch(0.38_0.03_230)]">当前 FBA</span>
           <span className="text-sm text-[color:oklch(0.62_0.025_220)]">:</span>
           <span className="min-w-0 truncate text-sm font-semibold tabular-nums text-[color:oklch(0.29_0.035_230)]">
-            {task.id}
+            {task.task_display_id || task.id}
           </span>
         </div>
       }

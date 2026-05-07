@@ -861,20 +861,63 @@ def format_country_name(country_code: str) -> str:
     }.get(country_code.upper(), country_code)
 
 
+def split_address_parts(raw_address: Any) -> list[str]:
+    text = as_plain_text(raw_address)
+    parts: list[str] = []
+    buffer: list[str] = []
+    paren_depth = 0
+
+    for char in text:
+        if char == "(":
+            paren_depth += 1
+        elif char == ")" and paren_depth > 0:
+            paren_depth -= 1
+
+        if char == "," and paren_depth == 0:
+            part = "".join(buffer).strip()
+            if part:
+                parts.append(part)
+            buffer = []
+        else:
+            buffer.append(char)
+
+    final_part = "".join(buffer).strip()
+    if final_part:
+        parts.append(final_part)
+    return parts
+
+
+def address_part_starts_with_fc(part: str, fc: str) -> bool:
+    normalized_part = part.strip().upper()
+    normalized_fc = fc.strip().upper()
+    return (
+        normalized_part == normalized_fc
+        or normalized_part.startswith(f"{normalized_fc} ")
+        or normalized_part.startswith(f"{normalized_fc}-")
+        or normalized_part.startswith(f"{normalized_fc} -")
+    )
+
+
 def format_mul_warehouse_address(fc_code: Any, raw_address: Any) -> str:
     fc = as_plain_text(fc_code) or "UNKNOWN"
-    parts = [part.strip() for part in as_plain_text(raw_address).split(",") if part.strip()]
+    parts = split_address_parts(raw_address)
     if not parts:
         return f"仓库地址：{fc}"
 
-    start_idx = 1 if parts and (parts[0].upper() == fc.upper() or "AMAZON" in parts[0].upper()) else 0
+    first_part = parts[0]
+    if address_part_starts_with_fc(first_part, fc):
+        address_parts = [first_part]
+        start_idx = 1
+    else:
+        address_parts = [fc]
+        start_idx = 1 if "AMAZON" in first_part.upper() else 0
+
     street = parts[start_idx] if len(parts) > start_idx else ""
     city = parts[start_idx + 1] if len(parts) > start_idx + 1 else ""
     state = parts[start_idx + 2] if len(parts) > start_idx + 2 else ""
     postal = parts[start_idx + 3] if len(parts) > start_idx + 3 else ""
     country = format_country_name(parts[start_idx + 4]) if len(parts) > start_idx + 4 else ""
 
-    address_parts = [fc]
     if street or postal:
         address_parts.append(" ".join(part for part in [street, postal] if part))
     if city or state:
