@@ -4,7 +4,7 @@ import { PrimaryButton, SecondaryLink } from "@/components/ui/primary-button";
 import { StatusPill } from "@/components/ui/status-pill";
 import { fetchJson } from "@/lib/http";
 import { readPageData } from "@/lib/page-data";
-import { Activity, Boxes, Download, FileArchive, FileText, ListTodo, PackageCheck, UserRound } from "lucide-react";
+import { Activity, AlertTriangle, Boxes, Download, FileArchive, FileText, ListTodo, PackageCheck, UserRound, X } from "lucide-react";
 import { StrictMode, startTransition, useEffect, useEffectEvent, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -41,10 +41,21 @@ type TaskDetail = {
   can_download: boolean;
   download_url: string;
   fba_results: FbaResult[];
+  friendly_error?: FriendlyError | null;
 };
 
 type TaskDetailPayload = {
   task: TaskDetail;
+};
+
+type FriendlyError = {
+  title: string;
+  message: string;
+  failed_items: {
+    fba_code: string;
+    reason: string;
+  }[];
+  suggestions: string[];
 };
 
 function usePolling(callback: () => Promise<void>, enabled: boolean, intervalMs: number) {
@@ -66,8 +77,13 @@ function TaskDetailPage() {
   const payload = useMemo(() => readPageData<TaskDetailPayload>(), []);
   const [task, setTask] = useState(payload.task);
   const [hint, setHint] = useState("");
+  const [dismissedFailureNotice, setDismissedFailureNotice] = useState(false);
 
   const isTerminal = task.status === "SUCCESS" || task.status === "PARTIAL_SUCCESS" || task.status === "FAILED";
+  const shouldShowFailureNotice =
+    Boolean(task.friendly_error) &&
+    (task.status === "FAILED" || task.status === "PARTIAL_SUCCESS") &&
+    !dismissedFailureNotice;
 
   const refresh = async () => {
     const response = await fetchJson<TaskDetail>(`/api/tasks/${task.id}`);
@@ -77,6 +93,10 @@ function TaskDetailPage() {
   };
 
   usePolling(refresh, !isTerminal, 5000);
+
+  useEffect(() => {
+    setDismissedFailureNotice(false);
+  }, [task.id, task.status]);
 
   async function manualRefresh() {
     setHint("正在获取最新执行状态。");
@@ -155,6 +175,14 @@ function TaskDetailPage() {
         </div>
       }
     >
+      {shouldShowFailureNotice && task.friendly_error ? (
+        <FailureNoticeModal
+          notice={task.friendly_error}
+          canDownload={task.can_download}
+          downloadUrl={task.download_url}
+          onClose={() => setDismissedFailureNotice(true)}
+        />
+      ) : null}
       <section className="space-y-6">
         <BentoGrid className="mx-0 max-w-none md:auto-rows-[14rem] md:grid-cols-4">
           <BentoGridItem
@@ -205,7 +233,7 @@ function TaskDetailPage() {
                   <th className="px-6 py-4 font-semibold">状态</th>
                   <th className="px-6 py-4 font-semibold">下载数</th>
                   <th className="px-6 py-4 font-semibold">输出文件</th>
-                  <th className="px-6 py-4 font-semibold">错误</th>
+                  <th className="px-6 py-4 font-semibold">失败原因</th>
                 </tr>
               </thead>
               <tbody>
@@ -224,7 +252,9 @@ function TaskDetailPage() {
                       </td>
                       <td className="px-6 py-5 text-sm text-[color:oklch(0.33_0.02_232)]">{item.download_count ?? 0}</td>
                       <td className="px-6 py-5 text-sm text-[color:oklch(0.46_0.03_228)]">{item.output_workbook || "-"}</td>
-                      <td className="px-6 py-5 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">{item.error || "-"}</td>
+                      <td className="px-6 py-5 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
+                        {item.status === "SUCCESS" ? "-" : task.friendly_error?.failed_items.find((failed) => failed.fba_code === item.fba_code)?.reason || item.error || "-"}
+                      </td>
                     </tr>
                   ))
                 )}
@@ -241,14 +271,30 @@ function TaskDetailPage() {
               </div>
               <div>
                 <h2 className="font-[family-name:var(--font-display)] text-2xl font-semibold tracking-[-0.03em] text-[color:oklch(0.22_0.025_242)]">
-                  错误信息
+                  失败说明
                 </h2>
-                <p className="mt-1 text-sm text-[color:oklch(0.46_0.03_228)]">如果任务失败，这里会直接给出总错误。</p>
+                <p className="mt-1 text-sm text-[color:oklch(0.46_0.03_228)]">如果任务失败，这里会用普通话说明大概原因。</p>
               </div>
             </div>
-            <pre className="mt-5 overflow-x-auto rounded-[24px] bg-[color:oklch(0.97_0.01_95)] p-5 text-sm leading-7 text-[color:oklch(0.33_0.02_232)] whitespace-pre-wrap">
-              {task.error_message || "无"}
-            </pre>
+            {task.friendly_error ? (
+              <div className="mt-5 rounded-[24px] bg-[color:oklch(0.97_0.01_95)] p-5 text-sm leading-7 text-[color:oklch(0.33_0.02_232)]">
+                <p className="font-semibold text-[color:oklch(0.25_0.03_232)]">{task.friendly_error.title}</p>
+                <p className="mt-2">{task.friendly_error.message}</p>
+                <div className="mt-4 space-y-2">
+                  {task.friendly_error.failed_items.map((item) => (
+                    <div key={`${item.fba_code}-${item.reason}`} className="rounded-2xl border border-[color:oklch(0.9_0.02_80)] bg-white/72 px-4 py-3">
+                      <span className="font-semibold tabular-nums text-[color:oklch(0.29_0.035_230)]">{item.fba_code}</span>
+                      <span className="mx-2 text-[color:oklch(0.62_0.025_220)]">:</span>
+                      <span>{item.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <pre className="mt-5 overflow-x-auto rounded-[24px] bg-[color:oklch(0.97_0.01_95)] p-5 text-sm leading-7 text-[color:oklch(0.33_0.02_232)] whitespace-pre-wrap">
+                {task.error_message || "无"}
+              </pre>
+            )}
           </article>
 
           <article className="rounded-[30px] border border-white/70 bg-[linear-gradient(180deg,rgba(28,39,43,0.98),rgba(36,46,52,0.96))] p-6 shadow-[0_24px_90px_rgba(22,31,36,0.2)]">
@@ -267,6 +313,80 @@ function TaskDetailPage() {
         </section>
       </section>
     </AppShell>
+  );
+}
+
+function FailureNoticeModal({
+  notice,
+  canDownload,
+  downloadUrl,
+  onClose,
+}: {
+  notice: FriendlyError;
+  canDownload: boolean;
+  downloadUrl: string;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(12,22,24,0.42)] px-4 py-6 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <div className="relative w-full max-w-[620px] overflow-hidden rounded-[32px] border border-white/75 bg-[color:oklch(0.99_0.004_95)] p-6 shadow-[0_32px_110px_rgba(18,31,32,0.26)]">
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-5 top-5 inline-flex h-10 w-10 items-center justify-center rounded-full border border-[color:oklch(0.9_0.01_95)] bg-white text-[color:oklch(0.35_0.025_232)] transition hover:bg-[color:oklch(0.96_0.01_95)]"
+          aria-label="关闭失败提示"
+        >
+          <X className="h-4 w-4" />
+        </button>
+
+        <div className="flex gap-4 pr-9">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[color:oklch(0.95_0.045_50)] text-[color:oklch(0.56_0.12_42)]">
+            <AlertTriangle className="h-6 w-6" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold tracking-[0.16em] text-[color:oklch(0.54_0.04_70)]">任务失败提示</p>
+            <h2 className="mt-2 font-[family-name:var(--font-display)] text-3xl font-semibold tracking-[-0.04em] text-[color:oklch(0.2_0.025_242)]">
+              {notice.title}
+            </h2>
+            <p className="mt-3 text-base leading-7 text-[color:oklch(0.38_0.03_228)]">{notice.message}</p>
+          </div>
+        </div>
+
+        <div className="mt-6 space-y-3">
+          {notice.failed_items.map((item) => (
+            <div key={`${item.fba_code}-${item.reason}`} className="rounded-[22px] border border-[color:oklch(0.9_0.02_80)] bg-white/80 p-4">
+              <div className="text-sm font-semibold tabular-nums text-[color:oklch(0.25_0.03_232)]">{item.fba_code}</div>
+              <div className="mt-2 text-sm leading-6 text-[color:oklch(0.42_0.03_228)]">{item.reason}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-6 rounded-[22px] bg-[color:oklch(0.97_0.014_118)] p-4 text-sm leading-7 text-[color:oklch(0.36_0.035_140)]">
+          {notice.suggestions.map((item) => (
+            <p key={item}>· {item}</p>
+          ))}
+        </div>
+
+        <div className="mt-6 flex flex-wrap justify-end gap-3">
+          {canDownload ? (
+            <a
+              href={downloadUrl}
+              className="inline-flex min-h-11 items-center justify-center rounded-full bg-[color:oklch(0.9_0.05_156)] px-5 text-sm font-semibold text-[color:oklch(0.25_0.06_160)] transition hover:translate-y-[-1px]"
+            >
+              <Download className="mr-2 h-4 w-4" />
+              下载已完成文件
+            </a>
+          ) : null}
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex min-h-11 items-center justify-center rounded-full bg-[linear-gradient(135deg,oklch(0.45_0.09_164),oklch(0.58_0.08_182))] px-5 text-sm font-semibold text-white shadow-[0_14px_32px_rgba(31,92,74,0.2)] transition hover:translate-y-[-1px]"
+          >
+            我知道了
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

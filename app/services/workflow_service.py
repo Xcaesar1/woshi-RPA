@@ -243,6 +243,86 @@ def build_task_error_message(batch_report: dict) -> str | None:
     return None
 
 
+def simplify_failure_reason(error_code: str | None, error: str | None) -> str:
+    code = (error_code or "").strip()
+    text = (error or "").strip()
+    lower_text = text.lower()
+
+    if code == "shipment_not_found" or "未搜索到" in text:
+        return "领星里没有查到这个 FBA。请先确认 FBA 号是否填错, 或这个 FBA 是否属于当前账号能看到的店铺。"
+    if code in {"shipment_search_timeout", "shipment_detail_timeout"} or "详情页超时" in text or "搜索" in text and "超时" in text:
+        return "领星页面打开或搜索太慢, 这次没有成功进入详情页。可以稍后重试一次。"
+    if code in {"export_response_not_excel", "download_not_excel"} or "不是 excel" in lower_text:
+        return "领星没有返回正常的 Excel 文件。通常是这个货件还没准备好, 或页面上的导出还不能用。"
+    if code in {"export_modal_not_found", "download_dialog_not_found"}:
+        return "点击下载后没有出现导出确认框。可能是领星页面变了, 或当前货件状态还不能下载。"
+    if code in {"download_button_not_found", "shipment_cards_not_found"}:
+        return "没有找到下载按钮。请确认这个货件已经进入箱子标签页面, 并且页面里有仓库卡片。"
+    if code == "home_or_login_page_not_ready":
+        return "领星页面这次没有正常加载出来。系统会自动重试；如果连续出现, 请稍后再提交或联系负责人检查网络。"
+    if "ssl" in lower_text or "unexpected_eof" in lower_text or "eof occurred" in lower_text:
+        return "下载时领星连接中断了一次。通常是临时网络问题, 重新提交这几个 FBA 即可。"
+    if code in {"login_failed", "login_fields_not_found", "credentials_missing"} or "登录" in text:
+        return "领星登录没有成功。请联系负责人检查账号密码, 或确认当前是否需要重新登录。"
+    if code == "shipment_not_ready_for_box_labels" or "箱子标签" in text:
+        return "这个货件还没到可以下载箱子标签的步骤。等领星里进入箱子标签后再提交。"
+    if "bad offset" in lower_text or "not a zip file" in lower_text:
+        return "下载到的 Excel 文件不完整。可以先重试一次, 如果连续失败再联系负责人。"
+    if text:
+        return text
+    return "任务执行时遇到问题。可以先重试一次, 如果还失败再把详情页截图发给负责人。"
+
+
+def build_friendly_failure_notice(task_view: dict, fba_results: list[dict], batch_report: dict | None) -> dict | None:
+    status = task_view.get("status")
+    if status not in {"FAILED", "PARTIAL_SUCCESS"}:
+        return None
+
+    failed_items = [
+        {
+            "fba_code": item.get("fba_code") or "-",
+            "reason": simplify_failure_reason(item.get("error_code"), item.get("error")),
+        }
+        for item in fba_results
+        if item.get("status") != "SUCCESS"
+    ]
+
+    fatal_error = (batch_report or {}).get("fatal_error") or {}
+    if not failed_items and fatal_error.get("error"):
+        failed_items.append(
+            {
+                "fba_code": task_view.get("task_display_id") or task_view.get("id") or "-",
+                "reason": simplify_failure_reason(fatal_error.get("error_code"), fatal_error.get("error")),
+            }
+        )
+
+    if status == "PARTIAL_SUCCESS":
+        title = "有一部分 FBA 没处理成功"
+        message = "已经成功的文件可以先下载使用。没成功的 FBA 请按下面原因检查后再重新提交。"
+    else:
+        title = "这次任务没有处理成功"
+        message = "系统已经尝试打开领星并执行下载, 但中途遇到了下面的问题。"
+
+    if not failed_items:
+        failed_items.append(
+            {
+                "fba_code": task_view.get("task_display_id") or task_view.get("id") or "-",
+                "reason": simplify_failure_reason(None, task_view.get("error_message")),
+            }
+        )
+
+    return {
+        "title": title,
+        "message": message,
+        "failed_items": failed_items[:8],
+        "suggestions": [
+            "先检查 FBA 号有没有填错。",
+            "如果你手动在领星也查不到, 说明这个 FBA 当前不能处理。",
+            "如果你手动能查到, 把这个详情页截图发给负责人。",
+        ],
+    }
+
+
 def process_task(task: dict) -> dict:
     task_id = task["id"]
     job_dir = Path(task["job_dir"])
@@ -365,6 +445,7 @@ def get_task_detail(task_id: str) -> dict:
                 "fatal_error": (batch_report.get("fatal_error") or {}).get("error") if batch_report else None,
             },
             "fba_results": fba_results,
+            "friendly_error": build_friendly_failure_notice(task_view, fba_results, batch_report),
         }
     )
     return task_view
