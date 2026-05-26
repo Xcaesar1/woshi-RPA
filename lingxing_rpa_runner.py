@@ -148,6 +148,16 @@ def is_valid_xlsx_payload(body: bytes) -> bool:
         return False
 
 
+def compact_response_preview(body: bytes, limit: int = 120) -> str:
+    text = body[:1000].decode("utf-8", errors="ignore")
+    text = normalize_text(text)
+    if not text:
+        return "空响应"
+    if len(text) > limit:
+        return f"{text[:limit]}..."
+    return text
+
+
 def env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -2203,7 +2213,7 @@ class LingxingPlaywrightAutomation:
             url,
             data=json.dumps(payload, ensure_ascii=False),
             headers=self._clone_api_headers(headers),
-            timeout=120000,
+            timeout=env_int("LINGXING_API_JSON_TIMEOUT_MS", 20000, minimum=5000, maximum=120000),
         )
         body = response.body()
         if not response.ok:
@@ -2225,19 +2235,32 @@ class LingxingPlaywrightAutomation:
         if self.context is None:
             raise AutomationError("api_context_missing", "浏览器接口上下文未初始化")
         start = time.perf_counter()
-        response = self.context.request.post(
-            url,
-            data=json.dumps(payload, ensure_ascii=False),
-            headers=self._clone_api_headers(headers),
-            timeout=120000,
-        )
-        body = response.body()
-        if not response.ok:
-            raise AutomationError("api_export_http_error", f"领星导出接口 HTTP {response.status}")
-        if not is_valid_xlsx_payload(body):
-            raise AutomationError("api_export_not_excel", "领星导出接口返回的不是有效 Excel")
-        suggested_name = filename_from_content_disposition(response.headers.get("content-disposition")) or "packing_list.xlsx"
-        return suggested_name, body, elapsed_seconds(start)
+        attempts = env_int("LINGXING_API_EXPORT_ATTEMPTS", 2, minimum=1, maximum=3)
+        timeout_ms = env_int("LINGXING_API_EXPORT_TIMEOUT_MS", 12000, minimum=3000, maximum=120000)
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self.context.request.post(
+                    url,
+                    data=json.dumps(payload, ensure_ascii=False),
+                    headers=self._clone_api_headers(headers),
+                    timeout=timeout_ms,
+                )
+                body = response.body()
+                if not response.ok:
+                    raise AutomationError("api_export_http_error", f"领星导出接口 HTTP {response.status}")
+                if not is_valid_xlsx_payload(body):
+                    preview = compact_response_preview(body)
+                    raise AutomationError("api_export_not_excel", f"领星导出接口返回的不是有效 Excel：{preview}")
+                suggested_name = filename_from_content_disposition(response.headers.get("content-disposition")) or "packing_list.xlsx"
+                return suggested_name, body, elapsed_seconds(start)
+            except Exception as exc:
+                last_error = exc
+                if attempt < attempts:
+                    time.sleep(0.8 * attempt)
+        if last_error is not None:
+            raise last_error
+        raise AutomationError("api_export_not_excel", "领星导出接口返回的不是有效 Excel")
 
     def _capture_api_headers(self) -> tuple[dict[str, str], float]:
         if self.page is None:
@@ -2549,10 +2572,13 @@ class LingxingPlaywrightAutomation:
 
     def download_for_fba(self, fba_code: str, download_dir: Path, screenshot_dir: Path) -> dict[str, Any]:
         api_fast_path_error: str | None = None
+        api_fast_path_seconds: float | None = None
         if env_flag("LINGXING_API_FAST_PATH", True):
+            api_fast_path_start = time.perf_counter()
             try:
                 return self._download_for_fba_via_api(fba_code, download_dir, screenshot_dir)
             except Exception as exc:
+                api_fast_path_seconds = elapsed_seconds(api_fast_path_start)
                 api_fast_path_error = f"{type(exc).__name__}: {exc}"
 
         overall_start = time.perf_counter()
@@ -2595,7 +2621,7 @@ class LingxingPlaywrightAutomation:
                 signature = self._shipment_card_signature(card_text, len(seen_card_signatures) + 1)
                 if signature in seen_card_signatures:
                     continue
-                index = len(downloaded_files) + 1
+                index = len(downloaded_files) + len(pending_raw_downloads) + 1
                 warehouse_code = self._extract_warehouse_code(card_text, index)
                 card_download_start = time.perf_counter()
                 downloaded_file = self._download_card_packing_list(
@@ -2644,6 +2670,7 @@ class LingxingPlaywrightAutomation:
             "timings": timings,
             "download_strategy": "page_fallback" if api_fast_path_error else "page",
             "api_fast_path_error": api_fast_path_error,
+            "api_fast_path_seconds": api_fast_path_seconds,
             "download_duration_seconds": elapsed_seconds(overall_start),
             **self.current_page_state(),
         }
