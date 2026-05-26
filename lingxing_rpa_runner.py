@@ -10,6 +10,7 @@ import sys
 import time
 import traceback
 import urllib.request
+import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,8 @@ from lingxing_excel_processor import process_workbooks
 
 LINGXING_HOME_URL = "https://erp.lingxing.com/erp/home"
 LINGXING_FBA_CARGO_URL = "https://erp.lingxing.com/erp/msupply/fbaCargo"
+LINGXING_ERP_BASE_URL = "https://erp.lingxing.com"
+LINGXING_GW_BASE_URL = "https://gw.lingxingerp.com"
 DEFAULT_CONFIG_FILE_NAME = "lingxing_rpa.local.json"
 MANIFEST_HEADER_CANDIDATES = ["FBA号", "货件单号", "FBA"]
 DEFAULT_PAGE_TIMEOUT = 30
@@ -1311,6 +1314,7 @@ class LingxingPlaywrightAutomation:
         self.context = None
         self.page = None
         self.current_screenshot_dir: Path | None = None
+        self.api_headers_template: dict[str, str] | None = None
 
     def start(self) -> None:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -2175,6 +2179,286 @@ class LingxingPlaywrightAutomation:
             raise last_error
         return export_request.suggested_name or "packing_list.xlsx", b""
 
+    def _clone_api_headers(self, headers: dict[str, str]) -> dict[str, str]:
+        output = {
+            key: value
+            for key, value in headers.items()
+            if key.lower() not in {"content-length", "accept-encoding"}
+        }
+        output["content-type"] = "application/json;charset=UTF-8"
+        output["accept"] = "application/json, text/plain, */*"
+        output["x-ak-request-id"] = str(uuid.uuid4())
+        return output
+
+    def _api_post_json(
+        self,
+        headers: dict[str, str],
+        url: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], float]:
+        if self.context is None:
+            raise AutomationError("api_context_missing", "浏览器接口上下文未初始化")
+        start = time.perf_counter()
+        response = self.context.request.post(
+            url,
+            data=json.dumps(payload, ensure_ascii=False),
+            headers=self._clone_api_headers(headers),
+            timeout=120000,
+        )
+        body = response.body()
+        if not response.ok:
+            raise AutomationError("api_http_error", f"领星接口 HTTP {response.status}：{url}")
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except Exception as exc:
+            raise AutomationError("api_invalid_json", f"领星接口返回不是 JSON：{url}") from exc
+        if data.get("code") not in (1, 200, "1", "200", None) and data.get("success") is not True:
+            raise AutomationError("api_business_error", str(data.get("msg") or data.get("message") or "领星接口返回业务错误"))
+        return data, elapsed_seconds(start)
+
+    def _api_download_excel(
+        self,
+        headers: dict[str, str],
+        url: str,
+        payload: dict[str, Any],
+    ) -> tuple[str, bytes, float]:
+        if self.context is None:
+            raise AutomationError("api_context_missing", "浏览器接口上下文未初始化")
+        start = time.perf_counter()
+        response = self.context.request.post(
+            url,
+            data=json.dumps(payload, ensure_ascii=False),
+            headers=self._clone_api_headers(headers),
+            timeout=120000,
+        )
+        body = response.body()
+        if not response.ok:
+            raise AutomationError("api_export_http_error", f"领星导出接口 HTTP {response.status}")
+        if not is_valid_xlsx_payload(body):
+            raise AutomationError("api_export_not_excel", "领星导出接口返回的不是有效 Excel")
+        suggested_name = filename_from_content_disposition(response.headers.get("content-disposition")) or "packing_list.xlsx"
+        return suggested_name, body, elapsed_seconds(start)
+
+    def _capture_api_headers(self) -> tuple[dict[str, str], float]:
+        if self.page is None:
+            raise AutomationError("api_page_missing", "浏览器页面未初始化")
+        captured: dict[str, str] = {}
+
+        def on_request(request: Any) -> None:
+            if captured:
+                return
+            if "/api/fba_shipment/showShipment_v2" not in request.url:
+                return
+            captured.update(request.headers)
+
+        start = time.perf_counter()
+        self.page.on("request", on_request)
+        self.open_fba_shipments_page()
+        deadline = time.time() + 12
+        while time.time() < deadline and not captured:
+            self.page.wait_for_timeout(200)
+        if not captured:
+            raise AutomationError("api_headers_not_captured", "未能捕获领星接口请求头")
+        self.api_headers_template = captured
+        return captured, elapsed_seconds(start)
+
+    def _ensure_api_headers(self) -> tuple[dict[str, str], float]:
+        if self.api_headers_template:
+            return self.api_headers_template, 0.0
+        return self._capture_api_headers()
+
+    def _build_api_search_payload(self, fba_code: str) -> dict[str, Any]:
+        end_date = beijing_now().date()
+        start_date = end_date - timedelta(days=90)
+        return {
+            "search_field_time": "create_date",
+            "is_sta": "",
+            "is_awd": "",
+            "ship_mode": "",
+            "step": [],
+            "is_closed": "",
+            "application_diff": "",
+            "received_diff": "",
+            "application_received_diff": "",
+            "is_relate_packing_task_sn": "",
+            "is_add_tracking": "",
+            "delivery_order_status": [],
+            "box_type": "",
+            "is_uploaded_box": "",
+            "sta_transportation_mode": "",
+            "delivery_mode": "",
+            "carrier_type": "",
+            "create_uids": [],
+            "principal_uids": [],
+            "is_store_diff": "",
+            "search_field": "shipment_id",
+            "search_value": fba_code,
+            "shipment_status": [],
+            "is_relate_shipment": "",
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "seniorSearchList": [],
+            "shipment_type": [],
+            "offset": 0,
+            "length": 20,
+            "req_time_sequence": "/api/fba_shipment/showShipment_v2$$1",
+        }
+
+    def _api_search_shipment(self, headers: dict[str, str], fba_code: str) -> tuple[dict[str, Any], float]:
+        payload = self._build_api_search_payload(fba_code)
+        data, seconds = self._api_post_json(
+            headers,
+            f"{LINGXING_ERP_BASE_URL}/api/fba_shipment/showShipment_v2",
+            payload,
+        )
+        rows = ((data.get("data") or {}).get("list") or [])
+        exact_rows = [row for row in rows if str(row.get("shipment_id", "")).upper() == fba_code.upper()]
+        if len(exact_rows) != 1:
+            raise AutomationError("api_shipment_not_unique", f"接口查询 FBA {fba_code} 返回 {len(exact_rows)} 条精确结果")
+        return exact_rows[0], seconds
+
+    def _api_get_plan_detail(
+        self,
+        headers: dict[str, str],
+        local_task_id: str,
+    ) -> tuple[dict[str, Any], float]:
+        payload = {
+            "localTaskId": local_task_id,
+            "req_time_sequence": "/amz-sta-server/inbound-plan/detail$$1",
+        }
+        data, seconds = self._api_post_json(
+            headers,
+            f"{LINGXING_GW_BASE_URL}/amz-sta-server/inbound-plan/detail",
+            payload,
+        )
+        detail = data.get("data") or {}
+        if not detail.get("inboundPlanId"):
+            raise AutomationError("api_inbound_plan_missing", "接口未返回 inboundPlanId")
+        return detail, seconds
+
+    def _api_get_label_page(
+        self,
+        headers: dict[str, str],
+        *,
+        sid: int,
+        inbound_plan_id: str,
+    ) -> tuple[list[dict[str, Any]], float]:
+        payload = {
+            "inboundPlanId": inbound_plan_id,
+            "sid": sid,
+            "req_time_sequence": "/amz-sta-server/inbound-shipment/shipmentLabelPage$$1",
+        }
+        data, seconds = self._api_post_json(
+            headers,
+            f"{LINGXING_GW_BASE_URL}/amz-sta-server/inbound-shipment/shipmentLabelPage",
+            payload,
+        )
+        shipments = data.get("data") or []
+        if not shipments:
+            raise AutomationError("api_label_page_empty", "接口未返回箱子标签仓库数据")
+        return shipments, seconds
+
+    def _download_for_fba_via_api(self, fba_code: str, download_dir: Path, screenshot_dir: Path) -> dict[str, Any]:
+        overall_start = time.perf_counter()
+        timings: dict[str, float] = {}
+        self.current_screenshot_dir = screenshot_dir
+        download_dir.mkdir(parents=True, exist_ok=True)
+
+        stage_start = time.perf_counter()
+        self.ensure_logged_in()
+        timings["login_ready_seconds"] = elapsed_seconds(stage_start)
+
+        api_headers, timings["api_header_capture_seconds"] = self._ensure_api_headers()
+        shipment, timings["api_search_seconds"] = self._api_search_shipment(api_headers, fba_code)
+        local_task_id = str(shipment.get("local_sta_id") or "")
+        if not local_task_id:
+            raise AutomationError("api_local_task_id_missing", "接口结果没有 local_sta_id，无法走接口化下载")
+        try:
+            sid = int(shipment["sid"])
+        except Exception as exc:
+            raise AutomationError("api_sid_missing", "接口结果没有有效 sid") from exc
+
+        plan_detail, timings["api_plan_detail_seconds"] = self._api_get_plan_detail(api_headers, local_task_id)
+        label_shipments, timings["api_label_page_seconds"] = self._api_get_label_page(
+            api_headers,
+            sid=sid,
+            inbound_plan_id=str(plan_detail["inboundPlanId"]),
+        )
+
+        export_results: list[dict[str, Any]] = []
+        export_stage_start = time.perf_counter()
+        for index, label_shipment in enumerate(label_shipments, start=1):
+            shipment_id = label_shipment.get("shipmentId")
+            if not shipment_id:
+                raise AutomationError("api_label_shipment_id_missing", "接口箱子标签数据缺少 shipmentId")
+            warehouse_code = sanitize_filename_part(str(label_shipment.get("warehouseId") or f"WAREHOUSE{index:02d}"))
+            payload = {
+                "isBatch": 0,
+                "isPic": 0,
+                "packingListBOList": [
+                    {
+                        "localTaskId": local_task_id,
+                        "packingGroupId": None,
+                        "shipmentId": shipment_id,
+                    }
+                ],
+                "sid": sid,
+            }
+            suggested_name, body, seconds = self._api_download_excel(
+                api_headers,
+                f"{LINGXING_GW_BASE_URL}/amz-sta-server/inbound-packing/exportPackingListV2",
+                payload,
+            )
+            export_results.append(
+                {
+                    "sequence": index,
+                    "warehouse_code": warehouse_code,
+                    "shipment_confirmation_id": label_shipment.get("shipmentConfirmationId"),
+                    "shipment_id": shipment_id,
+                    "source_name": suggested_name,
+                    "body": body,
+                    "api_export_seconds": seconds,
+                }
+            )
+        timings["api_export_seconds"] = elapsed_seconds(export_stage_start)
+
+        downloaded_files: list[dict[str, Any]] = []
+        for item in export_results:
+            suggested_name = str(item["source_name"])
+            suffix = Path(suggested_name).suffix or ".xlsx"
+            target_path = download_dir / build_download_filename(
+                fba_code,
+                int(item["sequence"]),
+                str(item["warehouse_code"]),
+                suggested_name,
+                suffix,
+            )
+            if target_path.exists():
+                target_path = download_dir / f"{target_path.stem}_{build_timestamp()}{target_path.suffix}"
+            target_path.write_bytes(item["body"])
+            downloaded_files.append(
+                {
+                    "sequence": item["sequence"],
+                    "warehouse_code": item["warehouse_code"],
+                    "shipment_confirmation_id": item.get("shipment_confirmation_id"),
+                    "shipment_id": item.get("shipment_id"),
+                    "source_name": suggested_name,
+                    "saved_name": target_path.name,
+                    "saved_path": str(target_path),
+                    "download_source": "api_fast_path",
+                    "duration_seconds": item["api_export_seconds"],
+                }
+            )
+
+        return {
+            "warehouse_count": len(downloaded_files),
+            "downloaded_files": downloaded_files,
+            "timings": timings,
+            "download_strategy": "api_fast_path",
+            "download_duration_seconds": elapsed_seconds(overall_start),
+            **self.current_page_state(),
+        }
+
     def _download_export_response_raw(self, response: Any) -> tuple[str, bytes]:
         export_request = self._build_export_raw_request(response)
         try:
@@ -2264,6 +2548,13 @@ class LingxingPlaywrightAutomation:
         return sorted(resolved, key=lambda item: int(item["sequence"]))
 
     def download_for_fba(self, fba_code: str, download_dir: Path, screenshot_dir: Path) -> dict[str, Any]:
+        api_fast_path_error: str | None = None
+        if env_flag("LINGXING_API_FAST_PATH", True):
+            try:
+                return self._download_for_fba_via_api(fba_code, download_dir, screenshot_dir)
+            except Exception as exc:
+                api_fast_path_error = f"{type(exc).__name__}: {exc}"
+
         overall_start = time.perf_counter()
         timings: dict[str, float] = {}
         self.current_screenshot_dir = screenshot_dir
@@ -2351,6 +2642,8 @@ class LingxingPlaywrightAutomation:
             "warehouse_count": len(downloaded_files),
             "downloaded_files": downloaded_files,
             "timings": timings,
+            "download_strategy": "page_fallback" if api_fast_path_error else "page",
+            "api_fast_path_error": api_fast_path_error,
             "download_duration_seconds": elapsed_seconds(overall_start),
             **self.current_page_state(),
         }
