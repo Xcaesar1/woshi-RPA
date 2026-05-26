@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import io
 import json
 import os
 import re
 import sys
 import time
 import traceback
+import urllib.request
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 
 from openpyxl import load_workbook
 
@@ -29,6 +34,7 @@ DEFAULT_SEARCH_TIMEOUT = 30
 DOWNLOAD_STABLE_CHECK_SECONDS = 1.0
 VISIBLE_CLICKABLE_SELECTOR = "a,button,[role='button'],li,div,span,i,svg"
 BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
+BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 
 
 def beijing_now() -> datetime:
@@ -49,6 +55,15 @@ class AutomationError(RuntimeError):
 class LoginCredentials:
     username: str
     password: str
+
+
+@dataclass
+class RawExportRequest:
+    url: str
+    method: str
+    headers: dict[str, str]
+    data: bytes | None
+    suggested_name: str | None
 
 
 def dedupe_preserve_order(items: list[str]) -> list[str]:
@@ -100,8 +115,48 @@ def build_download_filename(fba_code: str, index: int, warehouse_code: str, orig
     return "_".join(parts) + suffix
 
 
+def filename_from_content_disposition(value: str | None) -> str | None:
+    if not value:
+        return None
+    utf8_match = re.search(r"filename\*=UTF-8''([^;]+)", value, flags=re.IGNORECASE)
+    if utf8_match:
+        return sanitize_filename_part(unquote(utf8_match.group(1)).strip().strip('"'))
+    plain_match = re.search(r'filename="?([^";]+)"?', value, flags=re.IGNORECASE)
+    if plain_match:
+        return sanitize_filename_part(unquote(plain_match.group(1)).strip().strip('"'))
+    return None
+
+
 def build_timestamp() -> str:
     return beijing_now().strftime("%Y%m%d-%H%M%S")
+
+
+def elapsed_seconds(start: float) -> float:
+    return round(time.perf_counter() - start, 3)
+
+
+def is_valid_xlsx_payload(body: bytes) -> bool:
+    if not body.startswith(b"PK"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            return archive.testzip() is None
+    except zipfile.BadZipFile:
+        return False
+
+
+def env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(value, maximum)
+    return value
 
 
 def json_default(value: Any) -> Any:
@@ -1250,6 +1305,7 @@ class LingxingPlaywrightAutomation:
         self.profile_dir = profile_dir
         self.credentials = credentials
         self.headless = env_flag("PLAYWRIGHT_HEADLESS", False)
+        self.block_static_resources = env_flag("PLAYWRIGHT_BLOCK_STATIC_RESOURCES", False)
         self.chrome_binary = locate_chrome_binary()
         self.playwright_manager = None
         self.context = None
@@ -1278,6 +1334,8 @@ class LingxingPlaywrightAutomation:
         try:
             self.playwright_manager = self.sync_playwright().start()
             self.context = self.playwright_manager.chromium.launch_persistent_context(**launch_kwargs)
+            if self.block_static_resources:
+                self.context.route("**/*", self._route_static_resources)
             self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         except Exception as exc:
             if self.context is not None:
@@ -1293,6 +1351,15 @@ class LingxingPlaywrightAutomation:
                     pass
                 self.playwright_manager = None
             raise AutomationError("browser_start_failed", f"启动 Playwright Chrome 失败：{exc}") from exc
+
+    def _route_static_resources(self, route: Any, request: Any) -> None:
+        try:
+            if request.resource_type in BLOCKED_RESOURCE_TYPES:
+                route.abort()
+                return
+        except Exception:
+            pass
+        route.continue_()
 
     def close(self) -> None:
         if self.context is not None:
@@ -1363,23 +1430,109 @@ class LingxingPlaywrightAutomation:
                 time.sleep(0.3)
         return False
 
+    def _has_login_fields(self) -> bool:
+        if self.page is None:
+            return False
+        try:
+            return self.page.locator("input[name='account']").count() > 0 and self.page.locator("input[name='pwd']").count() > 0
+        except Exception:
+            return False
+
+    def _has_app_shell(self) -> bool:
+        if self.page is None:
+            return False
+        try:
+            if self.page.locator("li.el-menu-item:has(i.lx_nav_fba)").count() > 0:
+                return True
+            if self.page.locator("div.search-input input.el-input__inner:not([readonly])").count() > 0:
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _is_lingxing_app_url(self) -> bool:
+        return bool(self.page is not None and "/erp/" in self.page.url and "/login" not in self.page.url)
+
+    def _is_fba_cargo_ready(self) -> bool:
+        if self.page is None:
+            return False
+        try:
+            return (
+                "/erp/msupply/fbaCargo" in self.page.url
+                and self.page.locator("div.search-input input.el-input__inner:not([readonly])").count() > 0
+            )
+        except Exception:
+            return False
+
+    def _looks_like_blank_page(self) -> bool:
+        if self.page is None:
+            return False
+        try:
+            body_text = self.page.locator("body").inner_text(timeout=1500)
+        except Exception:
+            return False
+        return normalize_text(body_text) == ""
+
+    def _wait_for_login_or_app_shell(self, timeout: int = DEFAULT_PAGE_TIMEOUT) -> str:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._has_login_fields():
+                return "login"
+            if self._has_app_shell():
+                return "app"
+            if self.page is not None:
+                self.page.wait_for_timeout(400)
+            else:
+                time.sleep(0.4)
+        if self.page is not None and "/login" in self.page.url:
+            return "login_pending"
+        return "unknown"
+
     def ensure_logged_in(self) -> None:
-        self.page.goto(LINGXING_HOME_URL, wait_until="domcontentloaded", timeout=120000)
-        self.page.wait_for_timeout(1500)
-        if "/login" not in self.page.url and self.page.locator("input[name='account']").count() == 0:
+        if self._is_lingxing_app_url():
+            if self._has_app_shell():
+                return
+            state = self._wait_for_login_or_app_shell(timeout=3)
+            if state == "app":
+                return
+
+        state = "unknown"
+        for attempt in range(3):
+            self.page.goto(LINGXING_HOME_URL, wait_until="domcontentloaded", timeout=120000)
+            state = self._wait_for_login_or_app_shell(timeout=20 if attempt == 0 else 12)
+            if state in {"app", "login", "login_pending"}:
+                break
+            if self._looks_like_blank_page():
+                self.page.wait_for_timeout(1200)
+                try:
+                    self.page.reload(wait_until="domcontentloaded", timeout=120000)
+                except Exception:
+                    pass
+                state = self._wait_for_login_or_app_shell(timeout=12)
+                if state in {"app", "login", "login_pending"}:
+                    break
+
+        if state == "app":
             return
 
         if self.credentials is None:
             raise AutomationError("credentials_missing", "仍在登录页，且未提供登录配置文件(username/password)")
 
-        if self.page.locator("input[name='account']").count() == 0 or self.page.locator("input[name='pwd']").count() == 0:
-            self.capture_screenshot("login_fields_not_found")
-            raise AutomationError("login_fields_not_found", "未找到登录输入框(name=account / name=pwd)")
+        if state == "login_pending":
+            state = self._wait_for_login_or_app_shell(timeout=30)
+            if state == "app":
+                return
+
+        if not self._has_login_fields():
+            self.capture_screenshot("home_or_login_page_not_ready")
+            raise AutomationError("home_or_login_page_not_ready", "领星页面没有加载完成，未识别到系统菜单或登录输入框")
 
         self.page.locator("input[name='account']").first.fill(self.credentials.username)
         self.page.locator("input[name='pwd']").first.fill(self.credentials.password)
 
-        login_button = self.page.locator("button.loginBtn").first
+        login_button = self.page.locator(
+            "button.loginBtn, button:has-text('登录'), button:has-text('Login')"
+        ).first
         if login_button.count() > 0:
             login_button.click(timeout=20000)
         else:
@@ -1387,8 +1540,12 @@ class LingxingPlaywrightAutomation:
 
         deadline = time.time() + max(DEFAULT_LOGIN_TIMEOUT, 35)
         while time.time() < deadline:
-            if "/login" not in self.page.url and self.page.locator("input[name='pwd']").count() == 0:
+            if self._has_app_shell():
                 return
+            if "/login" not in self.page.url and not self._has_login_fields():
+                self.page.wait_for_timeout(1000)
+                if self._has_app_shell():
+                    return
             self.page.wait_for_timeout(500)
 
         self.capture_screenshot("login_failed_still_on_login_page")
@@ -1396,11 +1553,28 @@ class LingxingPlaywrightAutomation:
 
     def open_fba_shipments_page(self) -> None:
         self.ensure_logged_in()
-        if "/erp/msupply/fbaCargo" in self.page.url and self.page.locator("div.search-input input.el-input__inner:not([readonly])").count() > 0:
+        if self._is_fba_cargo_ready():
             return
 
+        self.page.goto(LINGXING_FBA_CARGO_URL, wait_until="domcontentloaded", timeout=120000)
+        deadline = time.time() + 18
+        while time.time() < deadline:
+            if self._is_fba_cargo_ready():
+                return
+            if self._has_login_fields() or "/login" in self.page.url:
+                self.ensure_logged_in()
+                self.page.goto(LINGXING_FBA_CARGO_URL, wait_until="domcontentloaded", timeout=120000)
+                deadline = time.time() + 18
+                continue
+            self.page.wait_for_timeout(300)
+
         self.page.goto(LINGXING_HOME_URL, wait_until="domcontentloaded", timeout=120000)
-        self.page.wait_for_timeout(1000)
+        state = self._wait_for_login_or_app_shell(timeout=20)
+        if state in {"login", "login_pending"}:
+            self.ensure_logged_in()
+        if not self._has_app_shell():
+            self.capture_screenshot("home_app_shell_not_ready")
+            raise AutomationError("home_app_shell_not_ready", "登录后未识别到领星系统菜单")
         self.page.locator("li.el-menu-item:has(i.lx_nav_fba)").first.click(timeout=20000)
         self.page.wait_for_timeout(600)
 
@@ -1422,64 +1596,239 @@ class LingxingPlaywrightAutomation:
             raise AutomationError("fba_shipments_page_not_ready", "未能进入 FBA货件 页面")
 
     def _find_exact_shipment_matches(self, fba_code: str) -> list[Any]:
-        rows = self.page.locator("div.oneLine.ak-blue-pointer")
         matches: list[Any] = []
         normalized_fba = normalize_text(fba_code)
-        for index in range(rows.count()):
-            row = rows.nth(index)
+        selectors = [
+            "div.oneLine.ak-blue-pointer",
+            ".oneLine.ak-blue-pointer",
+            ".ak-blue-pointer",
+            "a",
+            "span",
+            "td",
+        ]
+        seen: set[str] = set()
+        for selector in selectors:
+            rows = self.page.locator(selector).filter(has_text=normalized_fba)
             try:
-                text = normalize_text(row.inner_text(timeout=1500))
+                row_count = min(rows.count(), 30)
             except Exception:
                 continue
-            if text == normalized_fba:
+            for index in range(row_count):
+                row = rows.nth(index)
+                try:
+                    if not row.is_visible(timeout=500):
+                        continue
+                    text = normalize_text(row.inner_text(timeout=1000))
+                except Exception:
+                    continue
+                if text != normalized_fba:
+                    continue
+                identity = f"{selector}:{index}:{text}"
+                if identity in seen:
+                    continue
+                seen.add(identity)
                 matches.append(row)
         return matches
 
+    def _has_exact_shipment_candidate(self, fba_code: str) -> bool:
+        script = """
+        (fbaCode) => {
+          const expected = (fbaCode || '').replace(/\\s+/g, ' ').trim();
+          const isVisible = (node) => {
+            if (!node) return false;
+            const style = window.getComputedStyle(node);
+            if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            const rect = node.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          };
+          const selectors = [
+            'div.oneLine.ak-blue-pointer',
+            '.oneLine.ak-blue-pointer',
+            '.ak-blue-pointer',
+            'a',
+            'span',
+            'td'
+          ];
+          for (const selector of selectors) {
+            for (const node of document.querySelectorAll(selector)) {
+              const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+              if (text === expected && isVisible(node)) return true;
+            }
+          }
+          return false;
+        }
+        """
+        try:
+            return bool(self.page.evaluate(script, fba_code))
+        except Exception:
+            return False
+
+    def _wait_for_shipment_detail_page(self, timeout: int = DEFAULT_PAGE_TIMEOUT) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.page is not None and any(text in self.page.url for text in ["SendToAmazonDetail", "ShipmentDetail"]):
+                detail_ready_deadline = time.time() + 2
+                while time.time() < detail_ready_deadline:
+                    if (
+                        self.page.locator("div.delivery-ship").count() > 0
+                        or self.page.get_by_text("Box Labels", exact=True).count() > 0
+                        or self.page.get_by_text("箱子标签", exact=True).count() > 0
+                    ):
+                        return True
+                    self.page.wait_for_timeout(150)
+                return True
+            if self.page is not None:
+                body_text = self._page_text()
+                if "箱子标签" in body_text or "Box Labels" in body_text:
+                    return True
+                self.page.wait_for_timeout(300)
+            else:
+                time.sleep(0.3)
+        return False
+
+    def _dispatch_shipment_dom_click(self, fba_code: str) -> bool:
+        script = """
+        (fbaCode) => {
+          const normalize = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+          const expected = normalize(fbaCode);
+          const selectors = [
+            'div.oneLine.ak-blue-pointer',
+            '.oneLine.ak-blue-pointer',
+            '.ak-blue-pointer',
+            'a',
+            'span',
+            'div'
+          ];
+          const seen = new Set();
+          for (const selector of selectors) {
+            for (const node of document.querySelectorAll(selector)) {
+              if (seen.has(node)) continue;
+              seen.add(node);
+              if (normalize(node.innerText || node.textContent) !== expected) continue;
+              const targets = [
+                node,
+                node.closest('a'),
+                node.closest('.ak-blue-pointer'),
+                node.closest('td'),
+                node.parentElement
+              ].filter(Boolean);
+              for (const target of targets) {
+                target.scrollIntoView({ block: 'center', inline: 'center' });
+                for (const eventName of ['mouseover', 'mousedown', 'mouseup', 'click']) {
+                  target.dispatchEvent(new MouseEvent(eventName, {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                  }));
+                }
+                if (typeof target.click === 'function') target.click();
+              }
+              return true;
+            }
+          }
+          return false;
+        }
+        """
+        try:
+            return bool(self.page.evaluate(script, fba_code))
+        except Exception:
+            return False
+
+    def _activate_shipment_match(self, match: Any, fba_code: str) -> bool:
+        click_attempts = [
+            lambda: match.click(timeout=5000),
+            lambda: match.click(timeout=5000, force=True),
+            lambda: match.dblclick(timeout=5000, force=True),
+            lambda: match.press("Enter", timeout=3000),
+            lambda: self._dispatch_shipment_dom_click(fba_code),
+        ]
+        for attempt in click_attempts:
+            try:
+                if self.context is not None:
+                    try:
+                        with self.context.expect_page(timeout=2500) as popup_info:
+                            result = attempt()
+                        new_page = popup_info.value
+                        new_page.wait_for_load_state("domcontentloaded", timeout=30000)
+                        self.page = new_page
+                    except Exception:
+                        result = attempt()
+                else:
+                    result = attempt()
+                if result is False:
+                    continue
+            except Exception:
+                continue
+            if self._wait_for_shipment_detail_page(timeout=8):
+                return True
+        return False
+
     def search_shipment(self, fba_code: str) -> None:
         self.open_fba_shipments_page()
-        query_input = self.page.locator("div.search-input input.el-input__inner:not([readonly])").first
+        query_input = self.page.locator(
+            "div.search-input input.el-input__inner:not([readonly]):visible, "
+            ".search-input input:not([readonly]):visible, "
+            "input.el-input__inner:not([readonly]):visible"
+        ).first
         try:
             query_input.scroll_into_view_if_needed(timeout=5000)
         except Exception:
             pass
         try:
+            query_input.click(timeout=10000, force=True)
             query_input.fill("", timeout=10000)
+            query_input.fill(fba_code, timeout=10000)
         except Exception:
-            pass
+            try:
+                query_input.press("Control+A", timeout=5000)
+                query_input.type(fba_code, timeout=20000)
+            except Exception:
+                query_input.evaluate(
+                    "(node, value) => { node.focus(); node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); }",
+                    fba_code,
+                )
+
         try:
-            query_input.fill(fba_code, timeout=20000)
+            current_value = normalize_text(query_input.input_value(timeout=3000))
         except Exception:
-            query_input.evaluate("(node, value) => { node.focus(); node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); }", fba_code)
+            current_value = ""
+        if current_value != normalize_text(fba_code):
+            query_input.evaluate(
+                "(node, value) => { node.focus(); node.value = value; node.dispatchEvent(new Event('input', { bubbles: true })); node.dispatchEvent(new Event('change', { bubbles: true })); }",
+                fba_code,
+            )
 
         search_icon = self.page.locator("i.lx_combo_search:visible").first
         if search_icon.count() > 0:
             search_icon.click(timeout=20000)
         else:
-            query_input.press("Enter")
+            try:
+                query_input.press("Enter", timeout=5000)
+            except Exception:
+                pass
 
         deadline = time.time() + DEFAULT_SEARCH_TIMEOUT
         while time.time() < deadline:
-            if self._find_exact_shipment_matches(fba_code):
+            if self._has_exact_shipment_candidate(fba_code):
                 return
             page_text = self._page_text()
-            if "暂无数据" in page_text or "没有找到" in page_text or "无数据" in page_text:
+            if any(text in page_text for text in ["暂无数据", "没有找到", "无数据", "No Data", "No data"]):
                 raise AutomationError("shipment_not_found", f"未搜索到 FBA {fba_code}")
             self.page.wait_for_timeout(500)
 
         raise AutomationError("shipment_search_timeout", f"搜索 FBA {fba_code} 超时")
 
     def open_shipment_detail(self, fba_code: str) -> None:
+        if self._dispatch_shipment_dom_click(fba_code) and self._wait_for_shipment_detail_page(timeout=10):
+            return
+
         matches = self._find_exact_shipment_matches(fba_code)
         if not matches:
             raise AutomationError("shipment_not_found", f"未找到 FBA {fba_code} 的精确结果")
 
-        try:
-            matches[0].click(timeout=5000, force=True)
-        except Exception:
-            matches[0].evaluate("(node) => node.click()")
-        if self._wait_for_url_contains_any(["SendToAmazonDetail", "ShipmentDetail"], timeout=DEFAULT_PAGE_TIMEOUT):
-            self.page.wait_for_timeout(2000)
-            return
+        for match in matches:
+            if self._activate_shipment_match(match, fba_code):
+                return
         raise AutomationError("shipment_detail_timeout", f"进入 FBA {fba_code} 详情页超时")
 
     def _detect_shipment_stage(self) -> str:
@@ -1515,7 +1864,7 @@ class LingxingPlaywrightAutomation:
                 target = locator.last
                 target.scroll_into_view_if_needed(timeout=2000)
                 target.click(timeout=3000, force=True)
-                self.page.wait_for_timeout(1500)
+                self.page.wait_for_timeout(700)
                 return
             except Exception:
                 continue
@@ -1559,6 +1908,154 @@ class LingxingPlaywrightAutomation:
                 continue
             matched_cards.append(card)
         return matched_cards
+
+    def _shipment_card_signature(self, card_text: str, index: int) -> str:
+        normalized = normalize_text(card_text)
+        reference_match = re.search(r"Reference\s*ID\s*[:：]?\s*([A-Z0-9-]+)", normalized, flags=re.IGNORECASE)
+        fba_match = re.search(r"\bFBA[A-Z0-9-]+\b", normalized, flags=re.IGNORECASE)
+        warehouse_code = self._extract_warehouse_code(normalized, index)
+        parts = [
+            warehouse_code,
+            reference_match.group(1).upper() if reference_match else "",
+            fba_match.group(0).upper() if fba_match else "",
+        ]
+        signature = "|".join(part for part in parts if part)
+        return signature or normalized[:160]
+
+    def _reset_shipment_card_scroll(self) -> None:
+        script = """
+        () => {
+          const cards = Array.from(document.querySelectorAll('div.delivery-ship'));
+          const containers = new Set();
+          const addScrollableParents = (node) => {
+            let current = node ? node.parentElement : null;
+            while (current && current !== document.body) {
+              if (current.scrollWidth > current.clientWidth + 20) {
+                containers.add(current);
+              }
+              current = current.parentElement;
+            }
+          };
+          cards.forEach(addScrollableParents);
+          containers.forEach((node) => { node.scrollLeft = 0; });
+          window.scrollTo(0, window.scrollY);
+          return containers.size;
+        }
+        """
+        try:
+            self.page.evaluate(script)
+            self.page.wait_for_timeout(250)
+        except Exception:
+            pass
+
+    def _scroll_shipment_cards_right(self) -> bool:
+        script = """
+        () => {
+          const cards = Array.from(document.querySelectorAll('div.delivery-ship'));
+          const containers = new Set();
+          const addScrollableParents = (node) => {
+            let current = node ? node.parentElement : null;
+            while (current && current !== document.body) {
+              if (current.scrollWidth > current.clientWidth + 20) {
+                containers.add(current);
+              }
+              current = current.parentElement;
+            }
+          };
+          cards.forEach(addScrollableParents);
+          const states = [];
+          containers.forEach((node) => {
+            const before = node.scrollLeft;
+            const step = Math.max(360, Math.floor(node.clientWidth * 0.75));
+            node.scrollLeft = Math.min(node.scrollLeft + step, node.scrollWidth);
+            states.push(node.scrollLeft > before + 5);
+          });
+          const beforeWindow = window.scrollX;
+          window.scrollBy({ left: Math.floor(window.innerWidth * 0.75), top: 0, behavior: 'auto' });
+          states.push(window.scrollX > beforeWindow + 5);
+          return states.some(Boolean);
+        }
+        """
+        try:
+            moved = bool(self.page.evaluate(script))
+            self.page.wait_for_timeout(450)
+            return moved
+        except Exception:
+            return False
+
+    def _download_card_packing_list(
+        self,
+        *,
+        card: Any,
+        fba_code: str,
+        index: int,
+        warehouse_code: str,
+        download_dir: Path,
+        defer_raw_download: bool = False,
+    ) -> dict[str, Any]:
+        response = None
+        download_source = "browser_download"
+        try:
+            with self.page.expect_response(
+                lambda resp: "exportPackingListV2" in resp.url and resp.status == 200,
+                timeout=DEFAULT_DOWNLOAD_TIMEOUT * 1000,
+            ) as response_info:
+                self._click_download_button_in_card(card)
+                self._choose_export_without_images()
+            response = response_info.value
+        except Exception:
+            response = None
+
+        if response is None:
+            with self.page.expect_download(timeout=DEFAULT_DOWNLOAD_TIMEOUT * 1000) as download_info:
+                self._click_download_button_in_card(card)
+                self._choose_export_without_images()
+            download = download_info.value
+            suggested_name = download.suggested_filename or f"{fba_code}_{index}.xlsx"
+            suffix = Path(suggested_name).suffix or ".xlsx"
+            target_path = download_dir / build_download_filename(fba_code, index, warehouse_code, suggested_name, suffix)
+            if target_path.exists():
+                target_path = download_dir / f"{target_path.stem}_{build_timestamp()}{target_path.suffix}"
+            download.save_as(str(target_path))
+        else:
+            suggested_name = filename_from_content_disposition(response.headers.get("content-disposition")) or "packing_list.xlsx"
+            download_source = "playwright_response"
+            try:
+                body = response.body()
+            except Exception:
+                body = b""
+            if not is_valid_xlsx_payload(body):
+                raw_request = self._build_export_raw_request(response)
+                if defer_raw_download:
+                    return {
+                        "sequence": index,
+                        "warehouse_code": warehouse_code,
+                        "source_name": suggested_name,
+                        "saved_name": None,
+                        "saved_path": None,
+                        "download_source": "raw_request_pending",
+                        "_raw_request": raw_request,
+                        "_fba_code": fba_code,
+                        "_download_dir": str(download_dir),
+                    }
+                suggested_name, body = self._download_export_request_raw(raw_request)
+                download_source = "raw_request"
+            suffix = Path(suggested_name).suffix or ".xlsx"
+            target_path = download_dir / build_download_filename(fba_code, index, warehouse_code, suggested_name, suffix)
+            if target_path.exists():
+                target_path = download_dir / f"{target_path.stem}_{build_timestamp()}{target_path.suffix}"
+            if not is_valid_xlsx_payload(body):
+                raise AutomationError("export_response_not_excel", "导出接口返回的不是 Excel 文件")
+            target_path.write_bytes(body)
+
+        return {
+            "sequence": index,
+            "warehouse_code": warehouse_code,
+            "source_name": suggested_name,
+            "saved_name": target_path.name,
+            "saved_path": str(target_path),
+            "download_source": download_source,
+        }
 
     def _extract_warehouse_code(self, card_text: str, index: int) -> str:
         normalized = normalize_text(card_text)
@@ -1623,46 +2120,238 @@ class LingxingPlaywrightAutomation:
             self.page.wait_for_timeout(300)
         raise AutomationError("export_modal_not_found", "未弹出导出装箱清单窗口")
 
+    def _build_export_raw_request(self, response: Any) -> RawExportRequest:
+        request = response.request
+        headers = {
+            key: value
+            for key, value in request.headers.items()
+            if key.lower() not in {"content-length", "cookie", "host", "accept-encoding"}
+        }
+        cookies = self.context.cookies() if self.context is not None else []
+        cookie_header = "; ".join(
+            f"{cookie['name']}={cookie['value']}"
+            for cookie in cookies
+            if "lingxing" in cookie.get("domain", "") or "lingxingerp" in cookie.get("domain", "")
+        )
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+
+        post_data = request.post_data
+        data = post_data.encode("utf-8") if isinstance(post_data, str) else post_data
+        suggested_name = filename_from_content_disposition(response.headers.get("content-disposition"))
+        return RawExportRequest(
+            url=request.url,
+            method=request.method,
+            headers=headers,
+            data=data,
+            suggested_name=suggested_name,
+        )
+
+    def _download_export_request_raw(self, export_request: RawExportRequest) -> tuple[str, bytes]:
+        last_error: Exception | None = None
+        for attempt in range(3):
+            raw_request = urllib.request.Request(
+                export_request.url,
+                data=export_request.data,
+                headers=export_request.headers,
+                method=export_request.method,
+            )
+            try:
+                with urllib.request.urlopen(raw_request, timeout=DEFAULT_DOWNLOAD_TIMEOUT) as raw_response:
+                    body = raw_response.read()
+                    suggested_name = (
+                        filename_from_content_disposition(raw_response.headers.get("content-disposition"))
+                        or export_request.suggested_name
+                    )
+                if is_valid_xlsx_payload(body):
+                    return suggested_name or "packing_list.xlsx", body
+                last_error = AutomationError("export_response_not_excel", "导出接口返回的不是 Excel 文件")
+            except Exception as exc:
+                last_error = exc
+            if attempt < 2:
+                time.sleep(1.2 * (attempt + 1))
+
+        if last_error is not None:
+            raise last_error
+        return export_request.suggested_name or "packing_list.xlsx", b""
+
+    def _download_export_response_raw(self, response: Any) -> tuple[str, bytes]:
+        export_request = self._build_export_raw_request(response)
+        try:
+            return self._download_export_request_raw(export_request)
+        except Exception:
+            body = response.body()
+            return export_request.suggested_name or "packing_list.xlsx", body
+
+    def _finalize_raw_download_metadata(
+        self,
+        *,
+        pending_item: dict[str, Any],
+        suggested_name: str,
+        body: bytes,
+        download_dir: Path,
+        download_source: str,
+    ) -> dict[str, Any]:
+        if not is_valid_xlsx_payload(body):
+            raise AutomationError("export_response_not_excel", "导出接口返回的不是 Excel 文件")
+        suffix = Path(suggested_name).suffix or ".xlsx"
+        target_path = download_dir / build_download_filename(
+            pending_item["_fba_code"],
+            int(pending_item["sequence"]),
+            str(pending_item["warehouse_code"]),
+            suggested_name,
+            suffix,
+        )
+        if target_path.exists():
+            target_path = download_dir / f"{target_path.stem}_{build_timestamp()}{target_path.suffix}"
+        target_path.write_bytes(body)
+        return {
+            "sequence": pending_item["sequence"],
+            "warehouse_code": pending_item["warehouse_code"],
+            "source_name": suggested_name,
+            "saved_name": target_path.name,
+            "saved_path": str(target_path),
+            "download_source": download_source,
+        }
+
+    def _resolve_pending_raw_downloads(
+        self,
+        pending_items: list[dict[str, Any]],
+        download_dir: Path,
+    ) -> list[dict[str, Any]]:
+        if not pending_items:
+            return []
+        max_workers = min(
+            len(pending_items),
+            env_int("EXPORT_RAW_DOWNLOAD_CONCURRENCY", 2, minimum=1, maximum=4),
+        )
+
+        def download_one(item: dict[str, Any]) -> tuple[dict[str, Any], str, bytes, float]:
+            start = time.perf_counter()
+            suggested_name, body = self._download_export_request_raw(item["_raw_request"])
+            return item, suggested_name, body, elapsed_seconds(start)
+
+        resolved: list[dict[str, Any]] = []
+        if max_workers <= 1:
+            for item in pending_items:
+                pending_item, suggested_name, body, raw_seconds = download_one(item)
+                metadata = self._finalize_raw_download_metadata(
+                    pending_item=pending_item,
+                    suggested_name=suggested_name,
+                    body=body,
+                    download_dir=download_dir,
+                    download_source="raw_request",
+                )
+                metadata["raw_download_seconds"] = raw_seconds
+                metadata["capture_seconds"] = pending_item.get("capture_seconds")
+                resolved.append(metadata)
+            return resolved
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(download_one, item) for item in pending_items]
+            for future in concurrent.futures.as_completed(futures):
+                pending_item, suggested_name, body, raw_seconds = future.result()
+                metadata = self._finalize_raw_download_metadata(
+                    pending_item=pending_item,
+                    suggested_name=suggested_name,
+                    body=body,
+                    download_dir=download_dir,
+                    download_source="raw_request_parallel",
+                )
+                metadata["raw_download_seconds"] = raw_seconds
+                metadata["capture_seconds"] = pending_item.get("capture_seconds")
+                resolved.append(metadata)
+        return sorted(resolved, key=lambda item: int(item["sequence"]))
+
     def download_for_fba(self, fba_code: str, download_dir: Path, screenshot_dir: Path) -> dict[str, Any]:
+        overall_start = time.perf_counter()
+        timings: dict[str, float] = {}
         self.current_screenshot_dir = screenshot_dir
         download_dir.mkdir(parents=True, exist_ok=True)
-        self.search_shipment(fba_code)
-        self.open_shipment_detail(fba_code)
-        self.ensure_box_labels_ready(fba_code)
 
-        cards = self._find_shipment_cards()
-        if not cards:
+        stage_start = time.perf_counter()
+        self.search_shipment(fba_code)
+        timings["search_seconds"] = elapsed_seconds(stage_start)
+
+        stage_start = time.perf_counter()
+        self.open_shipment_detail(fba_code)
+        timings["open_detail_seconds"] = elapsed_seconds(stage_start)
+
+        stage_start = time.perf_counter()
+        self.ensure_box_labels_ready(fba_code)
+        timings["box_labels_ready_seconds"] = elapsed_seconds(stage_start)
+
+        stage_start = time.perf_counter()
+        self._reset_shipment_card_scroll()
+        if not self._find_shipment_cards():
             raise AutomationError("shipment_cards_not_found", f"FBA {fba_code} 页面中未识别到仓库卡片")
+        timings["card_scan_seconds"] = elapsed_seconds(stage_start)
 
         downloaded_files: list[dict[str, Any]] = []
-        for index, card in enumerate(cards, start=1):
-            card_text = normalize_text(card.inner_text(timeout=2000))
-            warehouse_code = self._extract_warehouse_code(card_text, index)
-            with self.page.expect_download(timeout=DEFAULT_DOWNLOAD_TIMEOUT * 1000) as download_info:
-                self._click_download_button_in_card(card)
-                self._choose_export_without_images()
+        pending_raw_downloads: list[dict[str, Any]] = []
+        seen_card_signatures: set[str] = set()
+        idle_scroll_count = 0
+        stage_start = time.perf_counter()
 
-            download = download_info.value
-            suggested_name = download.suggested_filename or f"{fba_code}_{index}.xlsx"
-            suffix = Path(suggested_name).suffix or ".xlsx"
-            target_path = download_dir / build_download_filename(fba_code, index, warehouse_code, suggested_name, suffix)
-            if target_path.exists():
-                target_path = download_dir / f"{target_path.stem}_{build_timestamp()}{target_path.suffix}"
-            download.save_as(str(target_path))
-            downloaded_files.append(
-                {
-                    "sequence": index,
-                    "warehouse_code": warehouse_code,
-                    "source_name": suggested_name,
-                    "saved_name": target_path.name,
-                    "saved_path": str(target_path),
-                }
-            )
-            self.page.wait_for_timeout(800)
+        while idle_scroll_count < 3:
+            cards = self._find_shipment_cards()
+            downloaded_this_view = 0
+            for card in cards:
+                try:
+                    card_text = normalize_text(card.inner_text(timeout=2000))
+                except Exception:
+                    continue
+                signature = self._shipment_card_signature(card_text, len(seen_card_signatures) + 1)
+                if signature in seen_card_signatures:
+                    continue
+                index = len(downloaded_files) + 1
+                warehouse_code = self._extract_warehouse_code(card_text, index)
+                card_download_start = time.perf_counter()
+                downloaded_file = self._download_card_packing_list(
+                    card=card,
+                    fba_code=fba_code,
+                    index=index,
+                    warehouse_code=warehouse_code,
+                    download_dir=download_dir,
+                    defer_raw_download=True,
+                )
+                downloaded_file["capture_seconds"] = elapsed_seconds(card_download_start)
+                seen_card_signatures.add(signature)
+                if downloaded_file.get("_raw_request") is not None:
+                    pending_raw_downloads.append(downloaded_file)
+                else:
+                    downloaded_file["duration_seconds"] = downloaded_file["capture_seconds"]
+                    downloaded_files.append(downloaded_file)
+                downloaded_this_view += 1
+                self.page.wait_for_timeout(100)
 
+            moved = self._scroll_shipment_cards_right()
+            if not moved:
+                break
+            if downloaded_this_view == 0:
+                idle_scroll_count += 1
+            else:
+                idle_scroll_count = 0
+
+        raw_resolve_start = time.perf_counter()
+        resolved_raw_downloads = self._resolve_pending_raw_downloads(pending_raw_downloads, download_dir)
+        for item in resolved_raw_downloads:
+            capture_seconds = float(item.get("capture_seconds") or 0)
+            raw_seconds = float(item.get("raw_download_seconds") or 0)
+            item["duration_seconds"] = round(capture_seconds + raw_seconds, 3)
+        downloaded_files.extend(resolved_raw_downloads)
+        downloaded_files.sort(key=lambda item: int(item["sequence"]))
+        timings["download_cards_seconds"] = elapsed_seconds(stage_start)
+        timings["raw_download_resolve_seconds"] = elapsed_seconds(raw_resolve_start)
+        timings["raw_download_concurrency"] = min(
+            len(pending_raw_downloads),
+            env_int("EXPORT_RAW_DOWNLOAD_CONCURRENCY", 2, minimum=1, maximum=4),
+        ) if pending_raw_downloads else 0
         return {
-            "warehouse_count": len(cards),
+            "warehouse_count": len(downloaded_files),
             "downloaded_files": downloaded_files,
+            "timings": timings,
+            "download_duration_seconds": elapsed_seconds(overall_start),
             **self.current_page_state(),
         }
 
@@ -1731,6 +2420,7 @@ def run_single_fba(
     report_path: Path | None = None,
     log_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
+    fba_start = time.perf_counter()
     fba_root = batch_dir / sanitize_filename_part(fba_code)
     download_dir = download_dir or (fba_root / "downloads")
     output_dir = output_dir or (fba_root / "output")
@@ -1758,18 +2448,22 @@ def run_single_fba(
 
     try:
         emit_log(log_callback, f"[{fba_code}] 开始浏览器自动化下载")
+        download_stage_start = time.perf_counter()
         download_info = automation.download_for_fba(fba_code, download_dir, screenshot_dir)
         report.update(download_info)
         report["downloaded_files"] = download_info.get("downloaded_files", [])
-        emit_log(log_callback, f"[{fba_code}] 下载完成，开始整理 Excel")
+        report["browser_download_seconds"] = elapsed_seconds(download_stage_start)
+        emit_log(log_callback, f"[{fba_code}] 下载完成，耗时 {report['browser_download_seconds']} 秒，开始整理 Excel")
 
+        process_stage_start = time.perf_counter()
         process_report = process_workbooks(resource_dir, download_dir, output_dir)
+        report["excel_process_seconds"] = elapsed_seconds(process_stage_start)
         report["processing_output_workbook"] = process_report.get("output_workbook")
         report["processing_output_files"] = process_report.get("processing_output_files", [])
         report["processing_report_file"] = process_report.get("report_file")
         report["processing_anomalies"] = process_report.get("anomalies", [])
         report["status"] = "success"
-        emit_log(log_callback, f"[{fba_code}] 整理完成")
+        emit_log(log_callback, f"[{fba_code}] 整理完成，耗时 {report['excel_process_seconds']} 秒")
     except Exception as exc:
         report["status"] = "failed"
         report["error_code"] = exc.code if isinstance(exc, AutomationError) else "unexpected_error"
@@ -1780,6 +2474,7 @@ def run_single_fba(
         report.update(automation.current_page_state())
         emit_log(log_callback, f"[{fba_code}] 执行失败：{report['error']}")
     finally:
+        report["duration_seconds"] = elapsed_seconds(fba_start)
         report["finished_at"] = beijing_now_text()
         final_report_path = report_path or (fba_root / "automation_report.json")
         final_report_path.parent.mkdir(parents=True, exist_ok=True)

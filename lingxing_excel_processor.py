@@ -68,6 +68,7 @@ TEMPLATE_REQUIRED_HEADERS = [
     "FBA号",
     "备注/品线",
     "说明书/包装上-品牌",
+    "机型（说明书上）",
 ]
 
 MSKU_MAP_REQUIRED_HEADERS = [
@@ -79,6 +80,12 @@ STORE_DETAIL_REQUIRED_HEADERS = [
     "店铺+站点",
     "店铺",
     "店铺简称",
+]
+
+PRODUCT_SPEC_REQUIRED_HEADERS = [
+    "MSKU",
+    "SKU",
+    "说明书上规格型号",
 ]
 
 FIELD_MAPPING = {
@@ -95,6 +102,7 @@ FIELD_MAPPING = {
     "FBA号": "货件单号",
     "备注/品线": "品名关键词归类(浴缸/厨房/淋浴/面盆)",
     "说明书/包装上-品牌": "MSKU -> MSKU对应品线表[店铺] -> 店铺明细表[店铺]",
+    "机型（说明书上）": "深圳-产品规格表.xlsx[说明书上规格型号]",
 }
 
 PRODUCT_LINE_KEYWORDS = {
@@ -112,7 +120,8 @@ THIN_SIDE = Side(style="thin", color="000000")
 FULL_BORDER = Border(left=THIN_SIDE, right=THIN_SIDE, top=THIN_SIDE, bottom=THIN_SIDE)
 HEADER_ALIGNMENT = Alignment(horizontal="center", vertical="center", wrap_text=True)
 TITLE_ALIGNMENT = Alignment(horizontal="center", vertical="center")
-HEADER_FBA_FONT = InlineFont(rFont="宋体", b=True, sz=14, color="FF0000")
+HEADER_BOX_LABEL_FONT = InlineFont(rFont="宋体", b=True, sz=12, color="000000")
+HEADER_FBA_FONT = InlineFont(rFont="宋体", b=True, sz=12, color="FF0000")
 DATA_FONT = Font(name="宋体", size=12)
 TITLE_FONT = Font(name="宋体", size=20)
 ASCII_FONT_NAME = "Arial"
@@ -120,14 +129,14 @@ CJK_FONT_NAME = "宋体"
 HIGHLIGHT_FILL = PatternFill(fill_type="solid", fgColor="FFFF00")
 HIGHLIGHT_FONT_COLOR = "FF0000"
 DATA_ROW_HEIGHT = 30
-HEADER_ROW_HEIGHT = 20
+HEADER_ROW_HEIGHT = 22
 OUTPUT_COLUMN_WIDTHS = {
     1: 8,
     2: 18,
     3: 18,
-    4: 32,
+    4: 55,
     5: 20,
-    6: 18,
+    6: 22,
     7: 10,
     8: 10,
     9: 12,
@@ -135,6 +144,7 @@ OUTPUT_COLUMN_WIDTHS = {
     11: 20,
     12: 16,
     13: 24,
+    14: 18,
 }
 
 
@@ -331,6 +341,17 @@ def locate_store_detail_file(base_dir: Path) -> Path:
     raise FileNotFoundError("未找到店铺明细表 Excel 文件。")
 
 
+def locate_product_spec_file(base_dir: Path) -> Path | None:
+    exact_path = base_dir / "深圳-产品规格表.xlsx"
+    if exact_path.exists():
+        return exact_path
+
+    candidates = [path for path in iter_xlsx_files(base_dir) if "产品规格表" in path.name]
+    if candidates:
+        return sorted(candidates, key=lambda path: (len(path.name), path.name))[0]
+    return None
+
+
 def extract_metadata(worksheet: Worksheet, header_row: int) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     for row_idx in range(1, header_row):
@@ -384,6 +405,60 @@ def build_lookup_index(workbook_path: Path, selection: WorkbookSelection, key_he
         return index
     finally:
         workbook.close()
+
+
+def build_product_spec_indexes(resource_dir: Path, anomalies: list[str]) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    spec_path = locate_product_spec_file(resource_dir)
+    if spec_path is None:
+        anomalies.append("未找到深圳-产品规格表.xlsx，机型（说明书上）留空")
+        return {}, {}
+
+    try:
+        spec_selection = find_matching_sheet(spec_path, PRODUCT_SPEC_REQUIRED_HEADERS)
+        return (
+            build_lookup_index(spec_path, spec_selection, "MSKU"),
+            build_lookup_index(spec_path, spec_selection, "SKU"),
+        )
+    except Exception as exc:
+        anomalies.append(f"读取深圳-产品规格表.xlsx失败，机型（说明书上）留空：{exc}")
+        return {}, {}
+
+
+def resolve_product_model(
+    *,
+    row_number: int,
+    msku_value: Any,
+    sku_value: Any,
+    spec_msku_index: dict[str, list[dict[str, Any]]],
+    spec_sku_index: dict[str, list[dict[str, Any]]],
+    anomalies: list[str],
+) -> Any:
+    msku_key = normalize_lookup_key(msku_value)
+    sku_key = normalize_lookup_key(sku_value)
+    matches = spec_msku_index.get(msku_key, []) if msku_key else []
+    match_source = "MSKU"
+    if not matches and sku_key:
+        matches = spec_sku_index.get(sku_key, [])
+        match_source = "SKU"
+
+    if not matches:
+        msku_text = "" if is_blank(msku_value) else str(msku_value).strip()
+        anomalies.append(f"第 {row_number} 行：深圳-产品规格表.xlsx 中找不到机型：{msku_text}")
+        return None
+
+    model_values = dedupe_preserve_order(
+        [
+            str(match.get("说明书上规格型号")).strip()
+            for match in matches
+            if not is_blank(match.get("说明书上规格型号"))
+        ]
+    )
+    if not model_values:
+        anomalies.append(f"第 {row_number} 行：深圳-产品规格表.xlsx 匹配到{match_source}但机型为空")
+        return None
+    if len(model_values) > 1:
+        anomalies.append(f"第 {row_number} 行：深圳-产品规格表.xlsx 匹配到多个机型，已使用第一个：{', '.join(model_values)}")
+    return model_values[0]
 
 
 def clean_box_number(raw_value: Any) -> tuple[Any, str | None]:
@@ -506,10 +581,13 @@ def border_side_is_thin(side: Side) -> bool:
 
 def reinforce_header_block_borders(worksheet: Worksheet, header_row: int, header_blank_row: int, max_col: int) -> None:
     for col_idx in range(1, max_col + 1):
-        merged_range = (
-            f"{get_column_letter(col_idx)}{header_row}:{get_column_letter(col_idx)}{header_blank_row}"
-        )
-        sync_merged_range_borders(worksheet, merged_range)
+        cell = worksheet.cell(row=header_row, column=col_idx)
+        cell.border = FULL_BORDER
+        if header_blank_row != header_row:
+            merged_range = (
+                f"{get_column_letter(col_idx)}{header_row}:{get_column_letter(col_idx)}{header_blank_row}"
+            )
+            sync_merged_range_borders(worksheet, merged_range)
 
 
 def header_block_borders_are_complete(
@@ -564,13 +642,14 @@ def create_output_workbook(output_sheet_name: str) -> tuple[Any, Worksheet, Work
 
 
 def build_block_positions(start_row: int, detail_row_count: int) -> dict[str, int]:
+    header_row = start_row + 1
     return {
         "title_row": start_row,
-        "header_row": start_row + 1,
-        "header_blank_row": start_row + 2,
-        "detail_start_row": start_row + 3,
-        "summary_row": start_row + 3 + detail_row_count,
-        "next_start_row": start_row + 4 + detail_row_count,
+        "header_row": header_row,
+        "header_blank_row": header_row,
+        "detail_start_row": start_row + 2,
+        "summary_row": start_row + 2 + detail_row_count,
+        "next_start_row": start_row + 3 + detail_row_count,
     }
 
 
@@ -582,27 +661,21 @@ def apply_header_block(
     max_col: int,
 ) -> None:
     header_row = block_start_row + 1
-    header_blank_row = block_start_row + 2
+    header_blank_row = header_row
 
     if block_start_row > 1:
         worksheet.row_dimensions[block_start_row].height = worksheet.row_dimensions[1].height
         clone_row_format(worksheet, 2, header_row, max_col)
-        clone_row_format(worksheet, 3, header_blank_row, max_col)
     else:
         worksheet.row_dimensions[header_row].height = HEADER_ROW_HEIGHT
-        worksheet.row_dimensions[header_blank_row].height = HEADER_ROW_HEIGHT
 
-    ensure_merge_range(worksheet, build_title_merge_range(block_start_row))
+    ensure_merge_range(worksheet, build_title_merge_range(block_start_row, max_col))
     for col_idx in range(1, max_col + 1):
-        column_letter = get_column_letter(col_idx)
-        merged_range = f"{column_letter}{header_row}:{column_letter}{header_blank_row}"
-        ensure_merge_range(worksheet, merged_range)
         header_cell = worksheet.cell(row=header_row, column=col_idx)
         if col_idx != 6:
             header_cell.value = header_values.get(col_idx)
         header_cell.alignment = copy(HEADER_ALIGNMENT)
         header_cell.border = FULL_BORDER
-        sync_merged_range_borders(worksheet, merged_range)
 
     box_header_ref = f"{worksheet.cell(row=header_row, column=6).column_letter}{header_row}"
     apply_box_header_style(worksheet, box_header_ref, fba_number)
@@ -658,12 +731,12 @@ def ensure_header_room(worksheet: Worksheet, header_row: int) -> None:
     next_row = header_row + 1
     current_header_height = worksheet.row_dimensions[header_row].height or 15
     current_next_height = worksheet.row_dimensions[next_row].height or 15
-    worksheet.row_dimensions[header_row].height = max(current_header_height, 20)
-    worksheet.row_dimensions[next_row].height = max(current_next_height, 20)
+    worksheet.row_dimensions[header_row].height = max(current_header_height, HEADER_ROW_HEIGHT)
+    worksheet.row_dimensions[next_row].height = max(current_next_height, HEADER_ROW_HEIGHT)
 
 
-def build_title_merge_range(title_row: int) -> str:
-    return f"A{title_row}:M{title_row}"
+def build_title_merge_range(title_row: int, max_col: int | None = None) -> str:
+    return f"A{title_row}:{get_column_letter(max_col or len(TEMPLATE_REQUIRED_HEADERS))}{title_row}"
 
 
 def apply_title_style(worksheet: Worksheet, title_row: int, title_text: str) -> None:
@@ -679,15 +752,14 @@ def apply_box_header_style(worksheet: Worksheet, header_cell_ref: str, fba_numbe
     header_cell = worksheet[header_cell_ref]
     fba_text = "" if is_blank(fba_number) else str(fba_number).strip()
     if fba_text:
-        header_cell.value = CellRichText("箱号\n", TextBlock(HEADER_FBA_FONT, fba_text))
+        header_cell.value = CellRichText(
+            TextBlock(HEADER_BOX_LABEL_FONT, "箱号 "),
+            TextBlock(HEADER_FBA_FONT, fba_text),
+        )
     else:
         header_cell.value = "箱号"
-    header_cell.alignment = copy(HEADER_ALIGNMENT)
+    header_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
     header_cell.border = FULL_BORDER
-    sync_merged_range_borders(
-        worksheet,
-        f"{header_cell.column_letter}{header_cell.row}:{header_cell.column_letter}{header_cell.row + 1}",
-    )
     ensure_header_room(worksheet, header_cell.row)
 
 
@@ -1681,6 +1753,7 @@ def process_one_sku_workbooks(
     template_workbook, template_sheet, template_selection = create_output_workbook(output_sheet_name)
 
     anomalies: list[str] = []
+    spec_msku_index, spec_sku_index = build_product_spec_indexes(resource_dir, anomalies)
     try:
         target_max_col = len(TEMPLATE_REQUIRED_HEADERS)
         output_sheet_name = template_selection.sheet_name
@@ -1744,6 +1817,15 @@ def process_one_sku_workbooks(
                     if product_anomaly:
                         anomalies.append(f"第{ticket_index}票第 {offset + 1} 行：{product_anomaly}")
 
+                    product_model = resolve_product_model(
+                        row_number=offset + 1,
+                        msku_value=source_row.get("MSKU"),
+                        sku_value=source_row.get("SKU"),
+                        spec_msku_index=spec_msku_index,
+                        spec_sku_index=spec_sku_index,
+                        anomalies=anomalies,
+                    )
+
                     lookup_result = resolve_store_lookup(
                         row_number=offset + 1,
                         msku_value=source_row.get("MSKU"),
@@ -1768,6 +1850,7 @@ def process_one_sku_workbooks(
                         "FBA号": fba_number,
                         "备注/品线": product_line,
                         "说明书/包装上-品牌": lookup_result.brand_name,
+                        "机型（说明书上）": product_model,
                     }
 
                     for header, value in row_payload.items():
@@ -1788,6 +1871,7 @@ def process_one_sku_workbooks(
                             "mapped_line": lookup_result.mapped_line,
                             "ticket_value": lookup_result.ticket_value,
                             "brand_value": lookup_result.brand_name,
+                            "model_value": product_model,
                         }
                     )
 
@@ -1893,6 +1977,7 @@ def process_one_sku_workbooks(
             block_header_border_ok = True
             ticket_values_filled = True
             brand_values_filled = True
+            model_values_filled = True
             box_numbers_prefixed = True
             added_cells_centered = True
             added_cells_bordered = True
@@ -1932,7 +2017,7 @@ def process_one_sku_workbooks(
 
                 actual_title = written_sheet.cell(row=positions["title_row"], column=1).value
                 block_title_ok = block_title_ok and str(actual_title) == block["title_text"]
-                block_merge_ok = block_merge_ok and build_title_merge_range(positions["title_row"]) in {
+                block_merge_ok = block_merge_ok and build_title_merge_range(positions["title_row"], target_max_col) in {
                     str(cell_range) for cell_range in written_sheet.merged_cells.ranges
                 }
                 block_title_style_ok = (
@@ -1960,6 +2045,10 @@ def process_one_sku_workbooks(
                 )
                 brand_values_filled = brand_values_filled and all(
                     not is_blank(written_sheet.cell(row=row_idx, column=template_selection.headers["说明书/包装上-品牌"]).value)
+                    for row_idx in detail_rows
+                )
+                model_values_filled = model_values_filled and all(
+                    not is_blank(written_sheet.cell(row=row_idx, column=template_selection.headers["机型（说明书上）"]).value)
                     for row_idx in detail_rows
                 )
                 box_numbers_prefixed = box_numbers_prefixed and all(
@@ -2018,6 +2107,7 @@ def process_one_sku_workbooks(
             "box_numbers_prefixed": box_numbers_prefixed,
             "ticket_values_filled": ticket_values_filled,
             "brand_values_filled": brand_values_filled,
+            "model_values_filled": model_values_filled,
             "all_titles_match": block_title_ok,
             "all_title_merges_ok": block_merge_ok,
             "all_title_styles_ok": block_title_style_ok,
@@ -2047,10 +2137,12 @@ def process_one_sku_workbooks(
             anomalies.append("票数未全部按“店铺简称+海运第x票”填写")
         if not validations["brand_values_filled"]:
             anomalies.append("说明书/包装上-品牌未全部根据SKU查表填写")
+        if not validations["model_values_filled"]:
+            anomalies.append("机型（说明书上）未全部根据深圳-产品规格表.xlsx填写")
         if not validations["all_titles_match"]:
             anomalies.append("存在票块标题内容未按规则生成")
         if not validations["all_title_merges_ok"]:
-            anomalies.append("存在票块标题未保持 A:M 合并")
+            anomalies.append("存在票块标题未按表头列范围合并")
         if not validations["all_title_styles_ok"]:
             anomalies.append("存在票块标题样式不是宋体20居中")
         if not validations["all_box_headers_contain_fba"]:
