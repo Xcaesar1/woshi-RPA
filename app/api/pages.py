@@ -8,7 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.core.config import APP_DIR
+from app.core.config import APP_DIR, EXAMPLE_MANIFESTS
 from app.models.task import TASK_STATUS_CHOICES, TASK_STATUS_LABELS
 from app.services.workflow_service import get_system_status, get_task_detail, get_workflow_options, list_task_views
 
@@ -86,7 +86,7 @@ def new_task_page(request: Request):
         entry_name="task-new",
         page_data={
             "workflows": get_workflow_options(),
-            "example_files": ["fba_manifest.txt", "fba_manifest.xlsx"],
+            "example_files": list(EXAMPLE_MANIFESTS.keys()),
         },
     )
 

@@ -20,6 +20,7 @@ type AppShellProps = {
   actions?: ReactNode;
   children: ReactNode;
   aside?: ReactNode;
+  introMode?: "hero" | "none";
   pageClassName?: string;
 };
 
@@ -37,6 +38,7 @@ export function AppShell({
   actions,
   children,
   aside,
+  introMode = "hero",
   pageClassName,
 }: AppShellProps) {
   return (
@@ -102,55 +104,57 @@ export function AppShell({
         </header>
 
         <main className={cn("mt-6 flex-1 space-y-6", pageClassName)}>
-          <section className="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
-            <div className="relative overflow-hidden rounded-[32px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.92),rgba(250,247,241,0.8))] px-6 py-7 shadow-[0_28px_100px_rgba(34,54,44,0.10)]">
-              <div className="absolute inset-x-6 top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(76,115,111,0.4),transparent)]" />
-              <div className="space-y-4">
-                <span className="inline-flex w-fit rounded-full border border-[color:oklch(0.87_0.02_95)] bg-white/80 px-3 py-1 text-[0.68rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.51_0.04_205)]">
-                  {eyebrow}
-                </span>
-                <div className="space-y-3">
-                  <h1 className="max-w-4xl font-[family-name:var(--font-display)] text-[clamp(2rem,3vw,3.75rem)] leading-[1.02] font-semibold tracking-[-0.04em] text-[color:oklch(0.22_0.025_242)]">
-                    {title}
-                  </h1>
-                  <div className="max-w-3xl text-[0.98rem] leading-7 text-[color:oklch(0.42_0.03_228)]">
-                    {subtitle}
-                  </div>
-                  {callout ? <div className="pt-2">{callout}</div> : null}
-                </div>
-              </div>
-            </div>
-
-            <aside className="space-y-4">
-              <div className="rounded-[28px] border border-white/70 bg-white/78 p-5 shadow-[0_18px_70px_rgba(36,53,44,0.08)] backdrop-blur-xl">
-                <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
-                  小白上手指南
-                </p>
-                <div className="mt-4 space-y-3">
-                  <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
-                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">1. 准备清单</div>
-                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
-                      不会做表也没关系，先下载示例文件，把 FBA 号替换进去。
+          {introMode !== "none" ? (
+            <section className="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
+              <div className="relative overflow-hidden rounded-[32px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.92),rgba(250,247,241,0.8))] px-6 py-7 shadow-[0_28px_100px_rgba(34,54,44,0.10)]">
+                <div className="absolute inset-x-6 top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(76,115,111,0.4),transparent)]" />
+                <div className="space-y-4">
+                  <span className="inline-flex w-fit rounded-full border border-[color:oklch(0.87_0.02_95)] bg-white/80 px-3 py-1 text-[0.68rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.51_0.04_205)]">
+                    {eyebrow}
+                  </span>
+                  <div className="space-y-3">
+                    <h1 className="max-w-4xl font-[family-name:var(--font-display)] text-[clamp(2rem,3vw,3.75rem)] leading-[1.02] font-semibold tracking-[-0.04em] text-[color:oklch(0.22_0.025_242)]">
+                      {title}
+                    </h1>
+                    <div className="max-w-3xl text-[0.98rem] leading-7 text-[color:oklch(0.42_0.03_228)]">
+                      {subtitle}
                     </div>
-                  </div>
-                  <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
-                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">2. 上传提交</div>
-                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
-                      选择 `.txt` 或 `.xlsx`，填写提交人，然后点“开始处理”。
-                    </div>
-                  </div>
-                  <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
-                    <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">3. 等待下载</div>
-                    <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
-                      去“任务列表”看进度，显示可下载后直接拿结果包。
-                    </div>
+                    {callout ? <div className="pt-2">{callout}</div> : null}
                   </div>
                 </div>
               </div>
 
-              {aside}
-            </aside>
-          </section>
+              <aside className="space-y-4">
+                <div className="rounded-[28px] border border-white/70 bg-white/78 p-5 shadow-[0_18px_70px_rgba(36,53,44,0.08)] backdrop-blur-xl">
+                  <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
+                    小白上手指南
+                  </p>
+                  <div className="mt-4 space-y-3">
+                    <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
+                      <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">1. 准备清单</div>
+                      <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
+                        正常/UPS 准备 FBA 号；HL 发货准备 Amazon 后台导出的 CSV。
+                      </div>
+                    </div>
+                    <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
+                      <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">2. 上传提交</div>
+                      <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
+                        正常/UPS 直接粘贴 FBA；HL 选择对应流程后上传 CSV, 填写提交人再开始处理。
+                      </div>
+                    </div>
+                    <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
+                      <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">3. 等待下载</div>
+                      <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
+                        去“任务列表”看进度，显示可下载后直接拿结果包。
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {aside}
+              </aside>
+            </section>
+          ) : null}
 
           {actions ? <div className="flex flex-wrap items-center gap-3">{actions}</div> : null}
           {children}

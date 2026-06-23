@@ -1,9 +1,8 @@
-import { BentoGrid, BentoGridItem } from "@/components/ui/bento-grid";
 import { AppShell } from "@/components/layout/app-shell";
 import { PrimaryButton } from "@/components/ui/primary-button";
 import { fetchJson } from "@/lib/http";
 import { readPageData } from "@/lib/page-data";
-import { AlertCircle, CheckCircle2, ClipboardList, CloudUpload, FileSpreadsheet, FileText, PackageCheck, ShieldCheck, Upload } from "lucide-react";
+import { AlertCircle, CheckCircle2, ClipboardList, CloudUpload, FileText, ShieldCheck, Upload } from "lucide-react";
 import { createRoot } from "react-dom/client";
 import { StrictMode, useEffect, useMemo, useState } from "react";
 
@@ -22,9 +21,11 @@ type CreateTaskResponse = {
   redirect_url: string;
 };
 
+const AMAZON_HL_WORKFLOW_NAME = "amazon_hl_csv_process";
+
 function NewTaskPage() {
   const payload = useMemo(() => readPageData<TaskNewPayload>(), []);
-  const exampleFiles = payload.exampleFiles ?? payload.example_files ?? [];
+  const exampleFiles = (payload.exampleFiles ?? payload.example_files ?? []).filter((filename) => filename.endsWith(".csv"));
   const [workflow, setWorkflow] = useState(payload.workflows[0]?.name ?? "");
   const [submitter, setSubmitter] = useState("");
   const [fbaText, setFbaText] = useState("");
@@ -32,6 +33,7 @@ function NewTaskPage() {
   const [submitting, setSubmitting] = useState(false);
   const [hint, setHint] = useState("");
   const fbaCheck = useMemo(() => parseFbaTextForPreview(fbaText), [fbaText]);
+  const isAmazonHlWorkflow = workflow === AMAZON_HL_WORKFLOW_NAME;
 
   useEffect(() => {
     const remembered = window.localStorage.getItem("lingxing_submitter");
@@ -42,13 +44,24 @@ function NewTaskPage() {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!fbaCheck.codes.length && !file) {
-      setHint("请粘贴 FBA 号，或选择 .txt / .xlsx 清单文件");
-      return;
-    }
-    if (fbaCheck.invalid.length) {
-      setHint(`FBA号格式不正确，请先检查：${fbaCheck.invalid.slice(0, 3).join("、")}`);
-      return;
+    if (isAmazonHlWorkflow) {
+      if (!file) {
+        setHint("HL 发货请上传 Amazon 后台导出的 CSV 文件。");
+        return;
+      }
+      if (!file.name.toLowerCase().endsWith(".csv")) {
+        setHint("HL 发货只支持 Amazon 后台导出的 .csv 文件。");
+        return;
+      }
+    } else {
+      if (!fbaCheck.codes.length) {
+        setHint("正常/UPS 流程请直接粘贴 FBA 号，一行一个。");
+        return;
+      }
+      if (fbaCheck.invalid.length) {
+        setHint(`FBA号格式不正确，请先检查：${fbaCheck.invalid.slice(0, 3).join("、")}`);
+        return;
+      }
     }
 
     setSubmitting(true);
@@ -57,10 +70,10 @@ function NewTaskPage() {
       const formData = new FormData();
       formData.append("workflow_name", workflow);
       formData.append("submitter", submitter.trim());
-      if (fbaCheck.codes.length) {
-        formData.append("fba_text", fbaCheck.codes.join("\n"));
-      } else if (file) {
+      if (isAmazonHlWorkflow && file) {
         formData.append("manifest_file", file);
+      } else {
+        formData.append("fba_text", fbaCheck.codes.join("\n"));
       }
       const response = await fetchJson<CreateTaskResponse>("/api/tasks", {
         method: "POST",
@@ -82,48 +95,31 @@ function NewTaskPage() {
         { href: "/tasks/new", label: "新建任务", current: true, icon: "new" },
         { href: "/tasks", label: "任务列表", icon: "list" },
       ]}
+      introMode="none"
       title={
         <>
-          小白上手指南：
-          <br />
-          选文件，点提交，等结果。
+          上传清单并开始处理
         </>
       }
       subtitle={
         <>
-          第一次用也不用记命令。可以直接粘贴 FBA 号，也可以上传清单文件；系统会自动校验并排队处理，
-          完成后在任务列表下载成品 Excel。
+          正常/UPS 粘贴 FBA 号；HL 发货上传 Amazon 后台 CSV。系统会自动校验并排队处理。
         </>
       }
-      aside={
-        <div className="rounded-[28px] border border-white/70 bg-white/78 p-5 shadow-[0_18px_70px_rgba(36,53,44,0.08)] backdrop-blur-xl">
-          <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
-            不容易出错的做法
-          </p>
-          <div className="mt-4 space-y-3">
-            {["先用示例文件改 FBA 号", "提交人写真实姓名，方便筛选", "提交后去任务列表看状态"].map((item) => (
-              <div
-                key={item}
-                className="flex items-center gap-3 rounded-2xl bg-[color:oklch(0.975_0.012_92)] px-4 py-3 text-sm font-medium text-[color:oklch(0.35_0.03_228)]"
-              >
-                <CheckCircle2 className="h-4 w-4 shrink-0 text-[color:oklch(0.52_0.08_176)]" />
-                {item}
-              </div>
-            ))}
-          </div>
-        </div>
-      }
     >
-      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_360px]">
+      <section className="grid gap-5 xl:grid-cols-[minmax(0,1.14fr)_320px]">
         <div className="rounded-[30px] border border-white/70 bg-white/82 p-6 shadow-[0_20px_80px_rgba(36,56,43,0.08)] backdrop-blur-xl">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
-                提交流程
+                新建任务
               </p>
-              <h2 className="mt-2 font-[family-name:var(--font-display)] text-2xl font-semibold tracking-[-0.03em] text-[color:oklch(0.22_0.025_242)]">
+              <h1 className="mt-2 font-[family-name:var(--font-display)] text-2xl font-semibold tracking-[-0.03em] text-[color:oklch(0.22_0.025_242)]">
                 上传清单并开始处理
-              </h2>
+              </h1>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
+                正常/UPS 直接粘贴 FBA 号；领星暂时抓不到的 HL 货件, 选择 HL 流程后上传 Amazon CSV。
+              </p>
             </div>
             <div className="inline-flex items-center gap-2 rounded-full bg-[color:oklch(0.97_0.01_95)] px-3 py-2 text-xs font-medium text-[color:oklch(0.43_0.03_228)]">
               <ShieldCheck className="h-4 w-4 text-[color:oklch(0.5_0.08_172)]" />
@@ -137,7 +133,11 @@ function NewTaskPage() {
                 <span className="text-sm font-medium text-[color:oklch(0.32_0.02_232)]">流程类型</span>
                 <select
                   value={workflow}
-                  onChange={(event) => setWorkflow(event.target.value)}
+                  onChange={(event) => {
+                    setWorkflow(event.target.value);
+                    setFile(null);
+                    setHint("");
+                  }}
                   className="min-h-12 w-full rounded-2xl border border-[color:oklch(0.88_0.01_95)] bg-[color:oklch(0.99_0.002_95)] px-4 text-sm text-[color:oklch(0.28_0.02_232)] outline-none transition focus:border-[color:oklch(0.6_0.09_190)] focus:ring-2 focus:ring-[color:oklch(0.86_0.03_190)]"
                 >
                   {payload.workflows.map((item) => (
@@ -167,9 +167,9 @@ function NewTaskPage() {
                     <ClipboardList className="h-5 w-5" />
                   </div>
                   <div>
-                    <div className="text-sm font-semibold text-[color:oklch(0.24_0.02_232)]">方式一：直接粘贴 FBA 号</div>
+                    <div className="text-sm font-semibold text-[color:oklch(0.24_0.02_232)]">方式一：直接粘贴 FBA 号 (正常/UPS)</div>
                     <div className="mt-1 text-sm leading-6 text-[color:oklch(0.45_0.03_228)]">
-                      一行一个，或从表格里整列复制过来。格式需类似 <span className="font-semibold text-[color:oklch(0.3_0.04_196)]">FBA19C2P8D5D</span>。
+                      多个 FBA 一行一个, 或从表格整列复制过来。正常发货和 UPS 发货都走这个入口。
                     </div>
                   </div>
                 </div>
@@ -180,6 +180,7 @@ function NewTaskPage() {
                 value={fbaText}
                 onChange={(event) => setFbaText(event.target.value)}
                 placeholder={"例如：\nFBA19C2P8D5D\nFBA19BXBL1MT"}
+                disabled={isAmazonHlWorkflow}
                 className="mt-4 min-h-32 w-full resize-y rounded-2xl border border-[color:oklch(0.86_0.016_95)] bg-white/92 px-4 py-3 text-sm leading-6 text-[color:oklch(0.27_0.025_232)] outline-none transition placeholder:text-[color:oklch(0.67_0.02_228)] focus:border-[color:oklch(0.6_0.09_190)] focus:ring-2 focus:ring-[color:oklch(0.86_0.03_190)]"
               />
               {fbaCheck.invalid.length ? (
@@ -193,8 +194,9 @@ function NewTaskPage() {
             <label className="block cursor-pointer rounded-[28px] border border-dashed border-[color:oklch(0.82_0.03_186)] bg-[linear-gradient(180deg,rgba(244,250,248,0.96),rgba(255,255,255,0.92))] p-6 transition hover:border-[color:oklch(0.62_0.08_188)]">
               <input
                 type="file"
-                accept=".txt,.xlsx"
+                accept=".csv"
                 className="hidden"
+                disabled={!isAmazonHlWorkflow}
                 onChange={(event) => setFile(event.target.files?.[0] ?? null)}
               />
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -204,15 +206,20 @@ function NewTaskPage() {
                   </div>
                   <div className="space-y-1">
                     <div className="text-sm font-semibold text-[color:oklch(0.24_0.02_232)]">
-                      选择清单文件
+                      上传 HL Amazon CSV 文件
                     </div>
                     <div className="text-sm leading-6 text-[color:oklch(0.47_0.03_228)]">
-                      方式二：支持 `.txt` 与 `.xlsx`。如果上面已粘贴 FBA 号，会优先使用粘贴内容。
+                      方式二：用于领星暂时抓不到数据, 但 Amazon 后台能下载货件信息 CSV 的 HL 发货。
                     </div>
+                    {!isAmazonHlWorkflow ? (
+                      <div className="text-xs font-medium text-[color:oklch(0.5_0.04_70)]">
+                        需要先在“流程类型”里选择 HL 发货 Amazon CSV 整理。
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 <div className="rounded-full bg-white px-4 py-2 text-sm font-medium text-[color:oklch(0.33_0.03_232)] shadow-[0_12px_30px_rgba(41,61,52,0.08)]">
-                  {file ? file.name : "点击选择文件"}
+                  {file ? file.name : isAmazonHlWorkflow ? "点击选择 CSV 文件" : "选择 HL 流程后启用"}
                 </div>
               </div>
             </label>
@@ -227,46 +234,45 @@ function NewTaskPage() {
           </form>
         </div>
 
-        <div className="space-y-5">
-          <BentoGrid className="mx-0 max-w-none md:auto-rows-[14rem] md:grid-cols-2">
-            <BentoGridItem
-              className="md:col-span-2 border-[color:oklch(0.89_0.02_95)] bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(246,244,239,0.88))] p-5 shadow-[0_18px_55px_rgba(41,59,49,0.08)]"
-              icon={<PackageCheck className="h-5 w-5 text-[color:oklch(0.52_0.08_176)]" />}
-              title="这页里最重要的两个文件"
-              description="你可以直接下载示例，再把自己的 FBA 替换进去。这样对不会写格式的人也更友好。"
-              header={
-                <div className="rounded-2xl bg-[linear-gradient(135deg,rgba(66,145,137,0.12),rgba(223,182,106,0.12))] p-3 text-xs leading-6 text-[color:oklch(0.42_0.03_230)]">
-                  示例文件会一直跟当前解析规则保持一致。
-                </div>
-              }
-            />
-
+        <div className="rounded-[30px] border border-white/70 bg-white/82 p-5 shadow-[0_20px_70px_rgba(36,56,43,0.08)] backdrop-blur-xl">
+          <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
+            示例文件
+          </p>
+          <h2 className="mt-2 font-[family-name:var(--font-display)] text-2xl font-semibold tracking-[-0.03em] text-[color:oklch(0.22_0.025_242)]">
+            Amazon CSV 格式
+          </h2>
+          <p className="mt-2 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
+            HL 发货只需要上传 Amazon 后台导出的货件信息 CSV, 不使用旧版清单模板。
+          </p>
+          <div className="mt-4 rounded-[22px] bg-[color:oklch(0.97_0.012_95)] p-4 text-sm leading-6 text-[color:oklch(0.42_0.03_228)]">
+            必须包含: 货件编号, SKU, 商品名称, FNSKU, 原厂包装模板名称, 每箱件数, 箱子总数, 商品总数, 箱号。
+          </div>
+          <div className="mt-5 space-y-3">
             {exampleFiles.map((filename) => {
-              const isTxt = filename.endsWith(".txt");
               return (
-                <BentoGridItem
+                <a
                   key={filename}
-                  className="border-[color:oklch(0.89_0.02_95)] bg-white/92 p-5 shadow-[0_18px_55px_rgba(41,59,49,0.08)]"
-                  icon={
-                    isTxt ? (
-                      <FileText className="h-5 w-5 text-[color:oklch(0.57_0.09_210)]" />
-                    ) : (
-                      <FileSpreadsheet className="h-5 w-5 text-[color:oklch(0.55_0.09_156)]" />
-                    )
-                  }
-                  title={<a href={`/api/examples/${filename}`}>{filename}</a>}
-                  description={isTxt ? "每行一个 FBA，可写注释。" : "自动识别列名，适合批量提交。"}
-                  header={
-                    <div className="rounded-2xl bg-[color:oklch(0.975_0.006_95)] p-3 text-sm text-[color:oklch(0.34_0.02_232)]">
-                      <a className="font-medium hover:underline" href={`/api/examples/${filename}`}>
-                        立即下载示例
-                      </a>
-                    </div>
-                  }
-                />
+                  href={`/api/examples/${filename}`}
+                  className="flex items-start gap-3 rounded-[22px] border border-[color:oklch(0.89_0.02_95)] bg-white/88 p-4 text-[color:oklch(0.28_0.025_232)] shadow-[0_12px_32px_rgba(41,59,49,0.06)] transition hover:translate-y-[-1px] hover:bg-white"
+                >
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[color:oklch(0.94_0.035_178)] text-[color:oklch(0.42_0.08_182)]">
+                    <FileText className="h-5 w-5" />
+                  </span>
+                  <span>
+                    <span className="block text-sm font-semibold">{filename}</span>
+                    <span className="mt-1 block text-xs leading-5 text-[color:oklch(0.48_0.03_228)]">
+                      Amazon 后台导出的 HL 货件 CSV 示例。
+                    </span>
+                  </span>
+                </a>
               );
             })}
-          </BentoGrid>
+            {!exampleFiles.length ? (
+              <div className="rounded-[22px] border border-[color:oklch(0.89_0.02_95)] bg-white/88 p-4 text-sm leading-6 text-[color:oklch(0.48_0.03_228)]">
+                当前环境暂未提供示例文件, 请直接使用 Amazon 后台导出的 CSV。
+              </div>
+            ) : null}
+          </div>
         </div>
       </section>
     </AppShell>

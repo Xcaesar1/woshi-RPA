@@ -29,6 +29,10 @@ SOURCE_REQUIRED_HEADERS = [
     "箱号",
 ]
 
+SOURCE_OPTIONAL_HEADERS = [
+    "品线",
+]
+
 MUL_SKU_REQUIRED_HEADERS = [
     "序号",
     "MSKU",
@@ -100,7 +104,7 @@ FIELD_MAPPING = {
     "套/箱": "单箱数量",
     "票数": "店铺简称+海运第x票",
     "FBA号": "货件单号",
-    "备注/品线": "品名关键词归类(浴缸/厨房/淋浴/面盆)",
+    "备注/品线": "源表品线优先；无品线时按品名关键词归类(浴缸/厨房/淋浴/面盆)",
     "说明书/包装上-品牌": "MSKU -> MSKU对应品线表[店铺] -> 店铺明细表[店铺]",
     "机型（说明书上）": "深圳-产品规格表.xlsx[说明书上规格型号]",
 }
@@ -318,6 +322,11 @@ def locate_source_file(base_dir: Path) -> Path:
 
 
 def locate_msku_mapping_file(base_dir: Path) -> Path:
+    candidates = [path for path in iter_xlsx_files(base_dir) if "MSKU" in path.name and "品线表" in path.name]
+    updated_candidates = [path for path in candidates if "已更新产品编码" in path.name]
+    if updated_candidates:
+        return sorted(updated_candidates, key=lambda path: path.name, reverse=True)[0]
+
     exact_path = base_dir / "MSKU对应品线表.xlsx"
     if exact_path.exists():
         return exact_path
@@ -367,7 +376,11 @@ def extract_metadata(worksheet: Worksheet, header_row: int) -> dict[str, Any]:
 
 def extract_detail_rows(worksheet: Worksheet, selection: WorkbookSelection) -> list[dict[str, Any]]:
     detail_rows: list[dict[str, Any]] = []
-    relevant_headers = [header for header in SOURCE_REQUIRED_HEADERS if header in selection.headers]
+    relevant_headers = [
+        header
+        for header in [*SOURCE_REQUIRED_HEADERS, *SOURCE_OPTIONAL_HEADERS]
+        if header in selection.headers
+    ]
 
     for row_idx in range(selection.header_row + 1, worksheet.max_row + 1):
         row_data = {
@@ -1813,9 +1826,12 @@ def process_one_sku_workbooks(
                     if box_anomaly:
                         anomalies.append(f"第{ticket_index}票第 {offset + 1} 行：{box_anomaly}")
 
-                    product_line, product_anomaly = classify_product_line(source_row.get("品名"))
-                    if product_anomaly:
-                        anomalies.append(f"第{ticket_index}票第 {offset + 1} 行：{product_anomaly}")
+                    if is_blank(source_row.get("品线")):
+                        product_line, product_anomaly = classify_product_line(source_row.get("品名"))
+                        if product_anomaly:
+                            anomalies.append(f"第{ticket_index}票第 {offset + 1} 行：{product_anomaly}")
+                    else:
+                        product_line = str(source_row.get("品线")).strip()
 
                     product_model = resolve_product_model(
                         row_number=offset + 1,

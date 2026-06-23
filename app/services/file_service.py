@@ -18,6 +18,7 @@ from lingxing_rpa_runner import sanitize_filename_part
 
 
 ALLOWED_MANIFEST_SUFFIXES = {".txt", ".xlsx"}
+ALLOWED_AMAZON_HL_SUFFIXES = {".csv"}
 
 
 def now_display() -> str:
@@ -50,12 +51,19 @@ def build_job_directories(task_id: str) -> dict[str, Path]:
     return directories
 
 
-def save_uploaded_manifest(upload_file, task_id: str, input_dir: Path) -> tuple[Path, Path, str]:
+def save_uploaded_manifest(
+    upload_file,
+    task_id: str,
+    input_dir: Path,
+    *,
+    allowed_suffixes: set[str] | None = None,
+    invalid_message: str = "只支持上传 .txt 或 .xlsx 文件",
+) -> tuple[Path, Path, str]:
     ensure_app_directories()
     original_filename = sanitize_upload_name(upload_file.filename or "manifest.txt")
     suffix = Path(original_filename).suffix.lower()
-    if suffix not in ALLOWED_MANIFEST_SUFFIXES:
-        raise ValueError("只支持上传 .txt 或 .xlsx 文件")
+    if suffix not in (allowed_suffixes or ALLOWED_MANIFEST_SUFFIXES):
+        raise ValueError(invalid_message)
 
     upload_path = UPLOADS_DIR / f"{task_id}_{original_filename}"
     input_path = input_dir / original_filename

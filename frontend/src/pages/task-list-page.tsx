@@ -141,52 +141,44 @@ function TaskListPage() {
 
   return (
     <AppShell
-        eyebrow="任务列表"
-        nav={[
-          { href: "/tasks/new", label: "新建任务", icon: "new" },
-          { href: "/tasks", label: "任务列表", current: true, icon: "list" },
-        ]}
-        title={
-          <>
-            任务列表：
-            <br />
-            看进度，找任务，下载结果。
-          </>
-        }
-        subtitle={
-          <>
-            这里会自动刷新。你只需要看状态列：排队中就等一等，运行中表示正在处理，
-            已完成或部分成功时就可以点“下载”拿结果包。
-          </>
-        }
-        actions={
-          <>
-            <SecondaryLink href="/tasks/new">
-              <PlusCircle className="mr-2 h-4 w-4" />
-              新建任务
-            </SecondaryLink>
-            <PrimaryButton type="button" onClick={() => void fetchWithState()} disabled={loading}>
-              <Activity className="mr-2 h-4 w-4" />
-              {loading ? "刷新中" : "立即刷新"}
-            </PrimaryButton>
-            <div className="text-sm text-[color:oklch(0.46_0.03_228)]">{hint}</div>
-          </>
-        }
-        aside={
-          <div className="rounded-[28px] border border-white/70 bg-white/78 p-5 shadow-[0_18px_70px_rgba(36,53,44,0.08)] backdrop-blur-xl">
-            <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
-              小白怎么看状态
-            </p>
-            <div className="mt-4 space-y-3 text-sm leading-6 text-[color:oklch(0.42_0.03_228)]">
-              <p>看到“排队中”：任务已经收到了，等待后台处理。</p>
-              <p>看到“运行中”：浏览器正在下载并整理 Excel。</p>
-              <p>看到“已完成 / 部分成功 / 失败”：都可以下载结果包查看明细。</p>
-            </div>
-          </div>
-        }
+      eyebrow="任务列表"
+      nav={[
+        { href: "/tasks/new", label: "新建任务", icon: "new" },
+        { href: "/tasks", label: "任务列表", current: true, icon: "list" },
+      ]}
+      introMode="none"
+      title={<>任务列表</>}
+      subtitle={<>查看任务进度, 管理任务结果。</>}
       >
-        <section className="space-y-6">
-          <BentoGrid className="mx-0 max-w-none md:auto-rows-[14rem] md:grid-cols-4">
+        <section className="space-y-5">
+          <section className="rounded-[30px] border border-white/70 bg-white/82 p-6 shadow-[0_20px_80px_rgba(36,56,43,0.08)] backdrop-blur-xl">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+              <div>
+                <p className="text-[0.72rem] font-semibold uppercase tracking-[0.24em] text-[color:oklch(0.55_0.03_205)]">
+                  任务工作台
+                </p>
+                <h1 className="mt-2 font-[family-name:var(--font-display)] text-3xl font-semibold tracking-[-0.04em] text-[color:oklch(0.22_0.025_242)]">
+                  任务列表
+                </h1>
+                <p className="mt-2 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
+                  查看任务进度, 筛选提交记录, 下载已完成结果。
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <SecondaryLink href="/tasks/new">
+                  <PlusCircle className="mr-2 h-4 w-4" />
+                  新建任务
+                </SecondaryLink>
+                <PrimaryButton type="button" onClick={() => void fetchWithState()} disabled={loading}>
+                  <Activity className="mr-2 h-4 w-4" />
+                  {loading ? "刷新中" : "立即刷新"}
+                </PrimaryButton>
+              </div>
+            </div>
+            {hint ? <div className="mt-3 text-sm text-[color:oklch(0.46_0.03_228)]">{hint}</div> : null}
+          </section>
+
+          <BentoGrid className="mx-0 max-w-none md:auto-rows-[10rem] md:grid-cols-4">
             <BentoGridItem
               className="border-[color:oklch(0.89_0.02_95)] bg-white/92 p-5 shadow-[0_18px_55px_rgba(41,59,49,0.08)]"
               icon={<LayoutList className="h-5 w-5 text-[color:oklch(0.52_0.08_190)]" />}
@@ -367,7 +359,7 @@ function TaskListPage() {
 
 function MetricHeader({ label }: { label: string }) {
   return (
-    <div className="rounded-2xl bg-[linear-gradient(135deg,rgba(255,255,255,0.94),rgba(245,242,235,0.88))] p-3 text-xs font-medium uppercase tracking-[0.18em] text-[color:oklch(0.52_0.03_205)]">
+    <div className="rounded-2xl bg-[linear-gradient(135deg,rgba(255,255,255,0.94),rgba(245,242,235,0.88))] p-2 text-xs font-medium uppercase tracking-[0.18em] text-[color:oklch(0.52_0.03_205)]">
       {label}
     </div>
   );

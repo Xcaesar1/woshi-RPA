@@ -27,8 +27,7 @@ SQLITE_JOURNAL_MODE = os.environ.get("SQLITE_JOURNAL_MODE", "WAL").strip().upper
 RESOURCE_DIR = ROOT_DIR
 DEFAULT_CONFIG_PATH = ROOT_DIR / "lingxing_rpa.local.json"
 EXAMPLE_MANIFESTS = {
-    "fba_manifest.txt": ROOT_DIR / "fba_manifest.txt",
-    "fba_manifest.xlsx": ROOT_DIR / "fba_manifest.xlsx",
+    "amazon_hl_shipment.csv": ROOT_DIR / "amazon_hl_shipment.csv",
 }
 
 
@@ -68,12 +67,20 @@ WORKER_HEARTBEAT_TTL_SECONDS = env_int("WORKER_HEARTBEAT_TTL_SECONDS", max(HEART
 PLAYWRIGHT_HEADLESS = env_bool("PLAYWRIGHT_HEADLESS", False)
 RECENT_LOG_LINE_COUNT = 120
 
+LINGXING_WORKFLOW_NAME = "lingxing_fba_download_and_process"
+AMAZON_HL_WORKFLOW_NAME = "amazon_hl_csv_process"
+
 DEFAULT_WORKFLOW = WorkflowDefinition(
-    name="lingxing_fba_download_and_process",
-    label="领星 FBA 下载并整理",
+    name=LINGXING_WORKFLOW_NAME,
+    label="正常/UPS：通过领星下载并整理",
+)
+AMAZON_HL_WORKFLOW = WorkflowDefinition(
+    name=AMAZON_HL_WORKFLOW_NAME,
+    label="HL 发货 Amazon CSV 整理",
 )
 WORKFLOW_REGISTRY = {
     DEFAULT_WORKFLOW.name: DEFAULT_WORKFLOW,
+    AMAZON_HL_WORKFLOW.name: AMAZON_HL_WORKFLOW,
 }
 
 

@@ -29,12 +29,13 @@ from app.services.queue_service import (
 )
 from app.services.task_service import (
     claim_task,
+    get_task,
     list_expired_terminal_tasks,
     list_task_ids_by_status,
     reset_stale_running_tasks,
     touch_task_heartbeat,
 )
-from app.services.workflow_service import cleanup_expired_tasks, process_task
+from app.services.workflow_service import cleanup_expired_tasks, process_task, task_requires_browser
 
 
 class StoppableThread(threading.Thread):
@@ -103,23 +104,28 @@ def reconcile_runtime_state() -> dict[str, int]:
     return summary
 
 
-def process_claimed_task(task: dict, lease: BrowserSlotLease) -> None:
+def process_claimed_task(task: dict, lease: BrowserSlotLease | None) -> None:
     log_path = task.get("log_path")
     if log_path:
-        append_log_line(Path(log_path), f"worker 已领取任务，使用浏览器执行槽 #{lease.slot_index}")
+        if lease is not None:
+            append_log_line(Path(log_path), f"worker 已领取任务，使用浏览器执行槽 #{lease.slot_index}")
+        else:
+            append_log_line(Path(log_path), "worker 已领取任务，使用本地文件处理流程")
 
     heartbeat = TaskHeartbeatThread(task["id"], HEARTBEAT_INTERVAL_SECONDS)
-    renew = BrowserSlotRenewThread(lease, HEARTBEAT_INTERVAL_SECONDS)
+    renew = BrowserSlotRenewThread(lease, HEARTBEAT_INTERVAL_SECONDS) if lease is not None else None
     touch_task_heartbeat(task["id"])
     heartbeat.start()
-    renew.start()
+    if renew is not None:
+        renew.start()
     try:
         process_task(task)
     finally:
         heartbeat.stop()
-        renew.stop()
         heartbeat.join(timeout=1)
-        renew.join(timeout=1)
+        if renew is not None:
+            renew.stop()
+            renew.join(timeout=1)
 
 
 def run_worker(*, once: bool = False, poll_interval: int = WORKER_POLL_INTERVAL_SECONDS) -> None:
@@ -156,11 +162,13 @@ def run_worker(*, once: bool = False, poll_interval: int = WORKER_POLL_INTERVAL_
                     time.sleep(poll_interval)
                     continue
 
-                lease = acquire_browser_slot()
-                if lease is None:
-                    if once:
-                        return
-                    continue
+                queued_task = get_task(task_id)
+                if task_requires_browser(queued_task or {}):
+                    lease = acquire_browser_slot()
+                    if lease is None:
+                        if once:
+                            return
+                        continue
 
                 task = claim_task(task_id)
                 if task is None:

@@ -21,3 +21,4 @@ dist/
 build/
 frontend/node_modules/
 app/static/ui/
+lingxing_rpa.local.json
