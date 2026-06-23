@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api")
 @router.post("/tasks")
 def create_task_api(
     manifest_file: UploadFile | None = File(None),
+    manifest_files: list[UploadFile] | None = File(None),
     fba_text: str = Form(""),
     workflow_name: str = Form(...),
     submitter: str = Form(...),
@@ -23,6 +24,7 @@ def create_task_api(
     try:
         task = create_task_submission(
             manifest_upload=manifest_file,
+            manifest_uploads=manifest_files or [],
             fba_text=fba_text,
             workflow_name=workflow_name,
             submitter=submitter,
@@ -32,6 +34,8 @@ def create_task_api(
     finally:
         if manifest_file is not None:
             manifest_file.file.close()
+        for upload_file in manifest_files or []:
+            upload_file.file.close()
 
     return {
         "task": task,

@@ -29,7 +29,7 @@ function NewTaskPage() {
   const [workflow, setWorkflow] = useState(payload.workflows[0]?.name ?? "");
   const [submitter, setSubmitter] = useState("");
   const [fbaText, setFbaText] = useState("");
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [hint, setHint] = useState("");
   const fbaCheck = useMemo(() => parseFbaTextForPreview(fbaText), [fbaText]);
@@ -45,12 +45,13 @@ function NewTaskPage() {
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (isAmazonHlWorkflow) {
-      if (!file) {
-        setHint("HL 发货请上传 Amazon 后台导出的 CSV 文件。");
+      if (!files.length) {
+        setHint("HL 发货请上传一个或多个 Amazon 后台导出的 CSV 文件。");
         return;
       }
-      if (!file.name.toLowerCase().endsWith(".csv")) {
-        setHint("HL 发货只支持 Amazon 后台导出的 .csv 文件。");
+      const invalidFiles = files.filter((item) => !item.name.toLowerCase().endsWith(".csv"));
+      if (invalidFiles.length) {
+        setHint(`HL 发货只支持 .csv 文件：${invalidFiles.slice(0, 3).map((item) => item.name).join("、")}`);
         return;
       }
     } else {
@@ -70,8 +71,8 @@ function NewTaskPage() {
       const formData = new FormData();
       formData.append("workflow_name", workflow);
       formData.append("submitter", submitter.trim());
-      if (isAmazonHlWorkflow && file) {
-        formData.append("manifest_file", file);
+      if (isAmazonHlWorkflow) {
+        files.forEach((item) => formData.append("manifest_files", item));
       } else {
         formData.append("fba_text", fbaCheck.codes.join("\n"));
       }
@@ -135,7 +136,7 @@ function NewTaskPage() {
                   value={workflow}
                   onChange={(event) => {
                     setWorkflow(event.target.value);
-                    setFile(null);
+                    setFiles([]);
                     setHint("");
                   }}
                   className="min-h-12 w-full rounded-2xl border border-[color:oklch(0.88_0.01_95)] bg-[color:oklch(0.99_0.002_95)] px-4 text-sm text-[color:oklch(0.28_0.02_232)] outline-none transition focus:border-[color:oklch(0.6_0.09_190)] focus:ring-2 focus:ring-[color:oklch(0.86_0.03_190)]"
@@ -195,9 +196,10 @@ function NewTaskPage() {
               <input
                 type="file"
                 accept=".csv"
+                multiple
                 className="hidden"
                 disabled={!isAmazonHlWorkflow}
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
               />
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-start gap-3">
@@ -209,7 +211,7 @@ function NewTaskPage() {
                       上传 HL Amazon CSV 文件
                     </div>
                     <div className="text-sm leading-6 text-[color:oklch(0.47_0.03_228)]">
-                      方式二：用于领星暂时抓不到数据, 但 Amazon 后台能下载货件信息 CSV 的 HL 发货。
+                      方式二：一次可上传多个 Amazon CSV；也支持一个 CSV 内包含多个 FBA 货件。
                     </div>
                     {!isAmazonHlWorkflow ? (
                       <div className="text-xs font-medium text-[color:oklch(0.5_0.04_70)]">
@@ -219,9 +221,26 @@ function NewTaskPage() {
                   </div>
                 </div>
                 <div className="rounded-full bg-white px-4 py-2 text-sm font-medium text-[color:oklch(0.33_0.03_232)] shadow-[0_12px_30px_rgba(41,61,52,0.08)]">
-                  {file ? file.name : isAmazonHlWorkflow ? "点击选择 CSV 文件" : "选择 HL 流程后启用"}
+                  {files.length ? `已选 ${files.length} 个 CSV` : isAmazonHlWorkflow ? "点击选择 CSV 文件" : "选择 HL 流程后启用"}
                 </div>
               </div>
+              {files.length ? (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {files.slice(0, 6).map((item, index) => (
+                    <span
+                      key={`${item.name}-${item.size}-${index}`}
+                      className="rounded-full bg-white/86 px-3 py-1 text-xs font-medium text-[color:oklch(0.42_0.03_228)]"
+                    >
+                      {item.name}
+                    </span>
+                  ))}
+                  {files.length > 6 ? (
+                    <span className="rounded-full bg-white/86 px-3 py-1 text-xs font-medium text-[color:oklch(0.42_0.03_228)]">
+                      另外 {files.length - 6} 个
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
             </label>
 
             <div className="flex flex-wrap items-center gap-3">
@@ -242,7 +261,7 @@ function NewTaskPage() {
             Amazon CSV 格式
           </h2>
           <p className="mt-2 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
-            HL 发货只需要上传 Amazon 后台导出的货件信息 CSV, 不使用旧版清单模板。
+            HL 发货只需要上传 Amazon 后台导出的货件信息 CSV, 可一次选择多个文件。
           </p>
           <div className="mt-4 rounded-[22px] bg-[color:oklch(0.97_0.012_95)] p-4 text-sm leading-6 text-[color:oklch(0.42_0.03_228)]">
             必须包含: 货件编号, SKU, 商品名称, FNSKU, 原厂包装模板名称, 每箱件数, 箱子总数, 商品总数, 箱号。

@@ -34,6 +34,22 @@ def sanitize_upload_name(filename: str) -> str:
     return f"{safe_stem}{suffix}"
 
 
+def unique_upload_name(filename: str, used_names: set[str]) -> str:
+    safe_name = sanitize_upload_name(filename)
+    if safe_name not in used_names:
+        used_names.add(safe_name)
+        return safe_name
+
+    source = Path(safe_name)
+    index = 2
+    while True:
+        candidate = f"{source.stem}_{index}{source.suffix}"
+        if candidate not in used_names:
+            used_names.add(candidate)
+            return candidate
+        index += 1
+
+
 def build_job_directories(task_id: str) -> dict[str, Path]:
     ensure_app_directories()
     job_dir = JOBS_DIR / task_id
@@ -73,6 +89,47 @@ def save_uploaded_manifest(
     return upload_path, input_path, original_filename
 
 
+def save_uploaded_manifests(
+    upload_files,
+    task_id: str,
+    input_dir: Path,
+    *,
+    allowed_suffixes: set[str] | None = None,
+    invalid_message: str = "只支持上传 .txt 或 .xlsx 文件",
+) -> tuple[Path, list[Path], str]:
+    ensure_app_directories()
+    files = [upload_file for upload_file in upload_files if upload_file is not None]
+    if not files:
+        raise ValueError("未选择上传文件")
+
+    upload_root = UPLOADS_DIR / task_id
+    upload_root.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+    input_paths: list[Path] = []
+    original_names: list[str] = []
+
+    for upload_file in files:
+        original_filename = unique_upload_name(upload_file.filename or "manifest.csv", used_names)
+        suffix = Path(original_filename).suffix.lower()
+        if suffix not in (allowed_suffixes or ALLOWED_MANIFEST_SUFFIXES):
+            raise ValueError(invalid_message)
+
+        upload_path = upload_root / original_filename
+        input_path = input_dir / original_filename
+        try:
+            upload_file.file.seek(0)
+        except Exception:
+            pass
+        with upload_path.open("wb") as upload_handle:
+            shutil.copyfileobj(upload_file.file, upload_handle)
+        shutil.copy2(upload_path, input_path)
+        input_paths.append(input_path)
+        original_names.append(original_filename)
+
+    display_name = original_names[0] if len(original_names) == 1 else f"{original_names[0]} 等 {len(original_names)} 个文件"
+    return upload_root, input_paths, display_name
+
+
 def save_text_manifest(fba_text: str, task_id: str, input_dir: Path) -> tuple[Path, Path, str]:
     ensure_app_directories()
     original_filename = "pasted_fba_manifest.txt"
@@ -87,7 +144,10 @@ def save_text_manifest(fba_text: str, task_id: str, input_dir: Path) -> tuple[Pa
 
 def cleanup_submission_files(job_dir: Path, upload_path: Path | None = None) -> None:
     if upload_path and upload_path.exists():
-        upload_path.unlink()
+        if upload_path.is_dir():
+            shutil.rmtree(upload_path, ignore_errors=True)
+        else:
+            upload_path.unlink()
     if job_dir.exists():
         shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -97,7 +157,10 @@ def cleanup_task_artifacts(task: dict) -> None:
     if upload_path:
         upload_file = Path(upload_path)
         if upload_file.exists():
-            upload_file.unlink()
+            if upload_file.is_dir():
+                shutil.rmtree(upload_file, ignore_errors=True)
+            else:
+                upload_file.unlink()
 
     result_zip_path = task.get("result_zip_path")
     if result_zip_path:
@@ -131,10 +194,22 @@ def load_json_file(path: Path | None) -> dict | None:
 
 def locate_job_manifest(job_dir: Path) -> Path:
     input_dir = job_dir / "input"
+    for path in locate_job_manifests(job_dir):
+        return path
+    raise FileNotFoundError(f"任务目录中未找到上传清单：{input_dir}")
+
+
+def locate_job_manifests(job_dir: Path, allowed_suffixes: set[str] | None = None) -> list[Path]:
+    input_dir = job_dir / "input"
+    manifests: list[Path] = []
     for path in sorted(input_dir.iterdir()):
         if path.is_file():
-            return path
-    raise FileNotFoundError(f"任务目录中未找到上传清单：{input_dir}")
+            if allowed_suffixes is not None and path.suffix.lower() not in allowed_suffixes:
+                continue
+            manifests.append(path)
+    if not manifests:
+        raise FileNotFoundError(f"任务目录中未找到上传清单：{input_dir}")
+    return manifests
 
 
 def build_error_summary_text(batch_report: dict) -> str:

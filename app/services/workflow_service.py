@@ -31,12 +31,18 @@ from app.services.file_service import (
     default_result_zip_path,
     load_json_file,
     locate_job_manifest,
+    locate_job_manifests,
     resolve_primary_result_file,
+    save_uploaded_manifests,
     save_text_manifest,
     save_uploaded_manifest,
     tail_text_file,
 )
-from app.services.amazon_hl_csv_service import convert_amazon_hl_csv_to_source_workbook, parse_amazon_hl_csv
+from app.services.amazon_hl_csv_service import (
+    AmazonHlShipment,
+    convert_amazon_hl_shipment_to_source_workbook,
+    parse_amazon_hl_csv_shipments,
+)
 from app.services.queue_service import (
     count_browser_slots_in_use,
     enqueue_task,
@@ -85,6 +91,28 @@ def task_requires_browser(task: dict) -> bool:
     return task.get("workflow_name") != AMAZON_HL_WORKFLOW_NAME
 
 
+def parse_hl_shipments_from_paths(paths: list[Path]) -> list[AmazonHlShipment]:
+    shipments: list[AmazonHlShipment] = []
+    for path in paths:
+        try:
+            shipments.extend(parse_amazon_hl_csv_shipments(path))
+        except Exception as exc:
+            raise ValueError(f"{path.name} 解析失败：{exc}") from exc
+
+    if not shipments:
+        raise ValueError("HL 发货 CSV 中未解析到任何 FBA")
+
+    seen: set[str] = set()
+    duplicated: list[str] = []
+    for shipment in shipments:
+        if shipment.fba_code in seen:
+            duplicated.append(shipment.fba_code)
+        seen.add(shipment.fba_code)
+    if duplicated:
+        raise ValueError(f"HL 发货 CSV 中存在重复 FBA：{', '.join(dict.fromkeys(duplicated))}")
+    return shipments
+
+
 def build_task_view(task: dict) -> dict:
     view = dict(task)
     for field in TASK_TIME_FIELDS:
@@ -116,9 +144,11 @@ def resolve_task_fba_codes(task: dict) -> list[str]:
         return [str(code).strip().upper() for code in report_codes if str(code).strip()]
 
     try:
-        manifest_path = locate_job_manifest(job_dir)
-        if manifest_path.suffix.lower() == ".csv":
-            return [parse_amazon_hl_csv(manifest_path).fba_code]
+        manifest_paths = locate_job_manifests(job_dir)
+        if manifest_paths and all(path.suffix.lower() == ".csv" for path in manifest_paths):
+            shipments = parse_hl_shipments_from_paths(manifest_paths)
+            return [shipment.fba_code for shipment in shipments]
+        manifest_path = manifest_paths[0]
         return parse_manifest_file(manifest_path)
     except Exception:
         return []
@@ -183,6 +213,7 @@ def parse_fba_text_input(fba_text: str | None) -> list[str]:
 def create_task_submission(
     *,
     manifest_upload=None,
+    manifest_uploads=None,
     fba_text: str | None = None,
     workflow_name: str,
     submitter: str,
@@ -194,10 +225,12 @@ def create_task_submission(
     if not submitter:
         raise ValueError("提交人不能为空")
     pasted_fba_codes = parse_fba_text_input(fba_text)
+    hl_uploads = [upload for upload in ([manifest_upload] + list(manifest_uploads or [])) if upload is not None]
     if workflow_name == AMAZON_HL_WORKFLOW_NAME:
-        if not manifest_upload:
+        if not hl_uploads:
             raise ValueError("HL 发货请上传 Amazon 后台导出的 .csv 文件")
-        validate_hl_upload_filename(manifest_upload.filename)
+        for upload in hl_uploads:
+            validate_hl_upload_filename(upload.filename)
     elif workflow_name == LINGXING_WORKFLOW_NAME:
         if not pasted_fba_codes:
             raise ValueError("正常/UPS 流程请直接粘贴 FBA 号，一行一个")
@@ -214,16 +247,16 @@ def create_task_submission(
 
     try:
         if workflow_name == AMAZON_HL_WORKFLOW_NAME:
-            upload_path, input_manifest_path, original_filename = save_uploaded_manifest(
-                manifest_upload,
+            upload_path, input_manifest_paths, original_filename = save_uploaded_manifests(
+                hl_uploads,
                 task_id=task_id,
                 input_dir=job_paths["input"],
                 allowed_suffixes=ALLOWED_AMAZON_HL_SUFFIXES,
                 invalid_message="HL 发货请上传 Amazon 后台导出的 .csv 文件",
             )
-            append_log_line(log_path, "任务已创建，开始校验 Amazon HL CSV 文件")
-            shipment = parse_amazon_hl_csv(input_manifest_path)
-            fba_codes = [shipment.fba_code]
+            append_log_line(log_path, f"任务已创建，开始校验 {len(input_manifest_paths)} 个 Amazon HL CSV 文件")
+            shipments = parse_hl_shipments_from_paths(input_manifest_paths)
+            fba_codes = [shipment.fba_code for shipment in shipments]
         elif pasted_fba_codes:
             upload_path, input_manifest_path, original_filename = save_text_manifest(
                 "\n".join(pasted_fba_codes),
@@ -282,96 +315,127 @@ def build_task_error_message(batch_report: dict) -> str | None:
 
 
 def process_amazon_hl_csv_task(task: dict, log) -> dict:
-    task_id = task["id"]
     job_dir = Path(task["job_dir"])
-    manifest_path = locate_job_manifest(job_dir)
+    manifest_paths = locate_job_manifests(job_dir, allowed_suffixes=ALLOWED_AMAZON_HL_SUFFIXES)
     reports_root = job_dir / "reports"
     reports_root.mkdir(parents=True, exist_ok=True)
+    source_dir = job_dir / "downloads" / "amazon_hl"
+    output_dir = job_dir / "output" / "amazon_hl"
+    started_at = beijing_now_display()
 
-    shipment = parse_amazon_hl_csv(manifest_path)
-    fba_code = shipment.fba_code
-    safe_fba = re.sub(r"[^A-Za-z0-9._-]+", "_", fba_code).strip("_") or fba_code
-    source_dir = job_dir / "downloads" / safe_fba
-    output_dir = job_dir / "output" / safe_fba
-    report_path = reports_root / f"{safe_fba}_automation_report.json"
+    shipments = parse_hl_shipments_from_paths(manifest_paths)
+    results: list[dict] = []
+    converted_results: list[dict] = []
 
-    result = {
-        "fba_code": fba_code,
-        "status": "pending",
-        "started_at": beijing_now_display(),
-        "fba_root": str(job_dir / safe_fba),
-        "downloads_dir": str(source_dir),
-        "output_dir": str(output_dir),
-        "screenshots_dir": str(job_dir / "screenshots" / safe_fba),
-        "downloaded_files": [],
-        "processing_output_workbook": None,
-        "processing_output_files": [],
-        "processing_report_file": None,
-        "error_code": None,
-        "error": None,
-        "traceback": None,
-        "failure_screenshot": None,
-    }
-
-    try:
-        log(f"[{fba_code}] 开始解析 Amazon HL CSV")
-        source_workbook, shipment = convert_amazon_hl_csv_to_source_workbook(
-            manifest_path,
-            source_dir,
-            resource_dir=RESOURCE_DIR,
-        )
-        result["downloaded_files"] = [
-            {
-                "sequence": 1,
-                "warehouse_code": "AMAZON-HL",
-                "path": str(source_workbook),
-                "filename": source_workbook.name,
-                "source": "amazon_csv",
-            }
-        ]
-        log(f"[{fba_code}] CSV 已转换为标准源表，开始整理 Excel")
-        process_report = process_workbooks(RESOURCE_DIR, source_dir, output_dir)
-        result["processing_output_workbook"] = process_report.get("output_workbook")
-        result["processing_output_files"] = process_report.get("processing_output_files", [])
-        result["processing_report_file"] = process_report.get("report_file")
-        result["processing_anomalies"] = process_report.get("anomalies", [])
-        result["amazon_hl_summary"] = {
-            "cargo_name": shipment.cargo_name,
-            "destination": shipment.destination,
-            "sku_count": shipment.sku_count,
-            "carton_count": shipment.carton_count,
-            "total_quantity": shipment.total_quantity,
+    for sequence, shipment in enumerate(shipments, start=1):
+        fba_code = shipment.fba_code
+        safe_fba = re.sub(r"[^A-Za-z0-9._-]+", "_", fba_code).strip("_") or fba_code
+        report_path = reports_root / f"{safe_fba}_automation_report.json"
+        result = {
+            "fba_code": fba_code,
+            "status": "pending",
+            "started_at": started_at,
+            "fba_root": str(job_dir / safe_fba),
+            "downloads_dir": str(source_dir),
+            "output_dir": str(output_dir),
+            "screenshots_dir": str(job_dir / "screenshots" / safe_fba),
+            "downloaded_files": [],
+            "processing_output_workbook": None,
+            "processing_output_files": [],
+            "processing_report_file": None,
+            "error_code": None,
+            "error": None,
+            "traceback": None,
+            "failure_screenshot": None,
+            "amazon_hl_summary": {
+                "cargo_name": shipment.cargo_name,
+                "destination": shipment.destination,
+                "sku_count": shipment.sku_count,
+                "carton_count": shipment.carton_count,
+                "total_quantity": shipment.total_quantity,
+            },
         }
-        result["status"] = "success"
-        log(f"[{fba_code}] HL CSV 整理完成")
-    except Exception as exc:
-        import traceback
+        results.append(result)
+        log(f"[{fba_code}] 开始解析 Amazon HL CSV")
+        try:
+            source_workbook, _ = convert_amazon_hl_shipment_to_source_workbook(
+                shipment,
+                source_dir,
+                resource_dir=RESOURCE_DIR,
+            )
+            result["downloaded_files"] = [
+                {
+                    "sequence": sequence,
+                    "warehouse_code": "AMAZON-HL",
+                    "path": str(source_workbook),
+                    "filename": source_workbook.name,
+                    "source": "amazon_csv",
+                }
+            ]
+            converted_results.append(result)
+            log(f"[{fba_code}] CSV 已转换为标准源表")
+        except Exception as exc:
+            import traceback
 
-        result["status"] = "failed"
-        result["error_code"] = "amazon_hl_csv_error"
-        result["error"] = str(exc)
-        result["traceback"] = traceback.format_exc()
-        log(f"[{fba_code}] HL CSV 整理失败：{exc}")
-    finally:
-        result["finished_at"] = beijing_now_display()
-        report_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            result["status"] = "failed"
+            result["error_code"] = "amazon_hl_csv_error"
+            result["error"] = str(exc)
+            result["traceback"] = traceback.format_exc()
+            log(f"[{fba_code}] HL CSV 转换失败：{exc}")
 
-    success_count = 1 if result.get("status") == "success" else 0
-    failed_count = 0 if success_count else 1
-    batch_status = "success" if success_count else "failed"
+    if converted_results:
+        log("开始整理 HL CSV 批次 Excel")
+        try:
+            process_report = process_workbooks(RESOURCE_DIR, source_dir, output_dir)
+            for result in converted_results:
+                result["processing_output_workbook"] = process_report.get("output_workbook")
+                result["processing_output_files"] = process_report.get("processing_output_files", [])
+                result["processing_report_file"] = process_report.get("report_file")
+                result["processing_anomalies"] = process_report.get("anomalies", [])
+                result["status"] = "success"
+                log(f"[{result['fba_code']}] HL CSV 整理完成")
+        except Exception as exc:
+            import traceback
+
+            error_traceback = traceback.format_exc()
+            for result in converted_results:
+                result["status"] = "failed"
+                result["error_code"] = "amazon_hl_csv_process_error"
+                result["error"] = str(exc)
+                result["traceback"] = error_traceback
+            log(f"HL CSV 批次整理失败：{exc}")
+
+    finished_at = beijing_now_display()
+    for result in results:
+        result["finished_at"] = finished_at
+        safe_fba = re.sub(r"[^A-Za-z0-9._-]+", "_", result["fba_code"]).strip("_") or result["fba_code"]
+        (reports_root / f"{safe_fba}_automation_report.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    success_count = sum(1 for result in results if result.get("status") == "success")
+    failed_count = len(results) - success_count
+    if success_count and failed_count:
+        batch_status = "partial_success"
+    elif success_count:
+        batch_status = "success"
+    else:
+        batch_status = "failed"
     batch_report = {
         "batch_dir": str(job_dir),
-        "manifest_path": str(manifest_path),
+        "manifest_path": str(manifest_paths[0]),
+        "manifest_paths": [str(path) for path in manifest_paths],
         "resource_dir": str(RESOURCE_DIR),
         "work_dir": str(job_dir.parent),
         "config_file": None,
-        "started_at": result.get("started_at"),
-        "finished_at": result.get("finished_at"),
-        "fba_codes": [fba_code],
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "fba_codes": [shipment.fba_code for shipment in shipments],
         "success_count": success_count,
         "failed_count": failed_count,
         "status": batch_status,
-        "results": [result],
+        "results": results,
         "fatal_error": None,
         "source": "amazon_hl_csv",
     }
