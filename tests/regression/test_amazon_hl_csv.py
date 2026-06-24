@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
-from app.core.config import AMAZON_HL_WORKFLOW_NAME
+from app.core.config import AMAZON_AGL_WORKFLOW_NAME
+from app.core.config import EXAMPLE_MANIFESTS
 from lingxing_excel_processor import (
     classify_source_workbook,
     extract_detail_rows,
@@ -20,7 +21,7 @@ from app.services.amazon_hl_csv_service import (
     parse_amazon_hl_csv,
     parse_amazon_hl_csv_shipments,
 )
-from app.services.workflow_service import create_task_submission, process_amazon_hl_csv_task, validate_hl_upload_filename
+from app.services.workflow_service import create_task_submission, get_workflow_options, process_amazon_hl_csv_task, validate_hl_upload_filename
 
 
 AMAZON_HL_SAMPLE = '''"工作流程名称","wffec879c4-0f2d-42f5-adba-17db47eeaa3e"
@@ -38,7 +39,7 @@ AMAZON_HL_SAMPLE = '''"工作流程名称","wffec879c4-0f2d-42f5-adba-17db47eeaa
 
 
 AMAZON_HL_SAME_TABLE_MULTI_FBA = '''"工作流程名称","wffec879c4-0f2d-42f5-adba-17db47eeaa3e"
-"货件名称","HL batch"
+"货件名称","AGL batch"
 "配送地址","FONTANA, CA"
 
 "原厂包装发货（3 箱）"
@@ -59,6 +60,13 @@ class AmazonHlCsvTests(unittest.TestCase):
         path = directory / name
         path.write_text(AMAZON_HL_SAMPLE, encoding="utf-8-sig")
         return path
+
+    def test_agl_user_facing_names_do_not_say_hl(self) -> None:
+        workflow = next(item for item in get_workflow_options() if item["name"] == AMAZON_AGL_WORKFLOW_NAME)
+
+        self.assertEqual(workflow["label"], "AGL 发货 Amazon CSV 整理")
+        self.assertIn("amazon_agl_shipment.csv", EXAMPLE_MANIFESTS)
+        self.assertNotIn("amazon_hl_shipment.csv", EXAMPLE_MANIFESTS)
 
     def sample_for_fba(self, fba_code: str, cargo_name: str | None = None) -> str:
         return AMAZON_HL_SAMPLE.replace("FBA19GPGFQ5Q", fba_code).replace(
@@ -139,6 +147,7 @@ class AmazonHlCsvTests(unittest.TestCase):
 
             self.assertEqual(shipment.fba_code, "FBA19GPGFQ5Q")
             self.assertTrue(workbook_path.name.startswith("FBA19GPGFQ5Q"))
+            self.assertTrue(workbook_path.name.endswith("_AMAZON_AGL_NO_PIC.xlsx"))
             source_info = classify_source_workbook(workbook_path)
             self.assertIsNotNone(source_info)
             self.assertEqual(source_info.format_type, "ONE_SKU")
@@ -150,6 +159,7 @@ class AmazonHlCsvTests(unittest.TestCase):
 
             workbook = load_workbook(workbook_path, data_only=True)
             try:
+                self.assertEqual(workbook.sheetnames[0], "Amazon AGL")
                 rows = extract_detail_rows(workbook[source_info.selection.sheet_name], source_info.selection)
                 self.assertEqual(len(rows), 1)
                 self.assertEqual(rows[0]["序号"], 1)
@@ -199,7 +209,7 @@ class AmazonHlCsvTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-    def test_create_hl_submission_accepts_multiple_csv_files_in_one_batch(self) -> None:
+    def test_create_agl_submission_accepts_multiple_csv_files_in_one_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             job_paths = {
@@ -241,8 +251,8 @@ class AmazonHlCsvTests(unittest.TestCase):
                 }
 
             uploads = [
-                DummyUpload("hl.csv", self.sample_for_fba("FBA19GPGFQ5Q")),
-                DummyUpload("hl.csv", self.sample_for_fba("FBA19GPGFQ6R")),
+                DummyUpload("agl.csv", self.sample_for_fba("FBA19GPGFQ5Q")),
+                DummyUpload("agl.csv", self.sample_for_fba("FBA19GPGFQ6R")),
             ]
             with (
                 patch("app.services.workflow_service.build_job_directories", return_value=job_paths),
@@ -252,16 +262,16 @@ class AmazonHlCsvTests(unittest.TestCase):
             ):
                 task = create_task_submission(
                     manifest_uploads=uploads,
-                    workflow_name=AMAZON_HL_WORKFLOW_NAME,
+                    workflow_name=AMAZON_AGL_WORKFLOW_NAME,
                     submitter="测试",
                 )
 
             self.assertEqual(captured["total_fba_count"], 2)
-            self.assertEqual(captured["original_filename"], "hl.csv 等 2 个文件")
+            self.assertEqual(captured["original_filename"], "agl.csv 等 2 个文件")
             self.assertEqual(task["task_display_id"], "FBA19GPGFQ5Q 等 2 个")
-            self.assertEqual(sorted(path.name for path in job_paths["input"].glob("*.csv")), ["hl.csv", "hl_2.csv"])
+            self.assertEqual(sorted(path.name for path in job_paths["input"].glob("*.csv")), ["agl.csv", "agl_2.csv"])
 
-    def test_create_hl_submission_rejects_duplicate_fba_codes(self) -> None:
+    def test_create_agl_submission_rejects_duplicate_fba_codes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             job_paths = {
@@ -289,7 +299,7 @@ class AmazonHlCsvTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "重复"):
                     create_task_submission(
                         manifest_uploads=uploads,
-                        workflow_name=AMAZON_HL_WORKFLOW_NAME,
+                        workflow_name=AMAZON_AGL_WORKFLOW_NAME,
                         submitter="测试",
                     )
 
@@ -318,9 +328,17 @@ class AmazonHlCsvTests(unittest.TestCase):
             self.assertEqual(report["success_count"], 2)
             self.assertEqual(report["failed_count"], 0)
             self.assertEqual(report["fba_codes"], ["FBA19GPGFQ5Q", "FBA19GPGFQ6R"])
+            self.assertEqual(report["source"], "amazon_agl_csv")
             self.assertEqual(len(report["results"]), 2)
+            for result in report["results"]:
+                self.assertIn("amazon_agl", result["downloads_dir"])
+                self.assertIn("amazon_agl", result["output_dir"])
+                self.assertIn("amazon_agl_summary", result)
+                self.assertNotIn("amazon_hl_summary", result)
+                self.assertEqual(result["downloaded_files"][0]["warehouse_code"], "AMAZON-AGL")
+                self.assertTrue(result["downloaded_files"][0]["filename"].endswith("_AMAZON_AGL_NO_PIC.xlsx"))
 
-    def test_hl_upload_filename_accepts_only_csv(self) -> None:
+    def test_agl_upload_filename_accepts_only_csv(self) -> None:
         validate_hl_upload_filename("FBA19GPGFQ5Q.csv")
 
         for name in ["fba_manifest.txt", "fba_manifest.xlsx", "FBA19GPGFQ5Q"]:

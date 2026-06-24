@@ -18,7 +18,8 @@ from lingxing_rpa_runner import sanitize_filename_part
 
 
 ALLOWED_MANIFEST_SUFFIXES = {".txt", ".xlsx"}
-ALLOWED_AMAZON_HL_SUFFIXES = {".csv"}
+ALLOWED_AMAZON_AGL_SUFFIXES = {".csv"}
+ALLOWED_AMAZON_HL_SUFFIXES = ALLOWED_AMAZON_AGL_SUFFIXES
 
 
 def now_display() -> str:

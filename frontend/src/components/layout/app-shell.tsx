@@ -133,13 +133,13 @@ export function AppShell({
                     <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
                       <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">1. 准备清单</div>
                       <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
-                        正常/UPS 准备 FBA 号；HL 发货准备 Amazon 后台导出的 CSV。
+                        正常/UPS 准备 FBA 号；AGL 发货准备 Amazon 后台导出的 CSV。
                       </div>
                     </div>
                     <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">
                       <div className="text-sm font-semibold text-[color:oklch(0.26_0.03_232)]">2. 上传提交</div>
                       <div className="mt-1 text-sm leading-6 text-[color:oklch(0.36_0.035_228)]">
-                        正常/UPS 直接粘贴 FBA；HL 选择对应流程后上传 CSV, 填写提交人再开始处理。
+                        正常/UPS 直接粘贴 FBA；AGL 选择对应流程后上传 CSV, 填写提交人再开始处理。
                       </div>
                     </div>
                     <div className="rounded-2xl bg-[color:oklch(0.968_0.014_92)] px-4 py-3">

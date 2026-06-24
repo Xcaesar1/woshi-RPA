@@ -21,7 +21,7 @@ type CreateTaskResponse = {
   redirect_url: string;
 };
 
-const AMAZON_HL_WORKFLOW_NAME = "amazon_hl_csv_process";
+const AMAZON_AGL_WORKFLOW_NAME = "amazon_hl_csv_process";
 
 function NewTaskPage() {
   const payload = useMemo(() => readPageData<TaskNewPayload>(), []);
@@ -33,7 +33,7 @@ function NewTaskPage() {
   const [submitting, setSubmitting] = useState(false);
   const [hint, setHint] = useState("");
   const fbaCheck = useMemo(() => parseFbaTextForPreview(fbaText), [fbaText]);
-  const isAmazonHlWorkflow = workflow === AMAZON_HL_WORKFLOW_NAME;
+  const isAmazonAglWorkflow = workflow === AMAZON_AGL_WORKFLOW_NAME;
 
   useEffect(() => {
     const remembered = window.localStorage.getItem("lingxing_submitter");
@@ -44,14 +44,14 @@ function NewTaskPage() {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (isAmazonHlWorkflow) {
+    if (isAmazonAglWorkflow) {
       if (!files.length) {
-        setHint("HL 发货请上传一个或多个 Amazon 后台导出的 CSV 文件。");
+        setHint("AGL 发货请上传一个或多个 Amazon 后台导出的 CSV 文件。");
         return;
       }
       const invalidFiles = files.filter((item) => !item.name.toLowerCase().endsWith(".csv"));
       if (invalidFiles.length) {
-        setHint(`HL 发货只支持 .csv 文件：${invalidFiles.slice(0, 3).map((item) => item.name).join("、")}`);
+        setHint(`AGL 发货只支持 .csv 文件：${invalidFiles.slice(0, 3).map((item) => item.name).join("、")}`);
         return;
       }
     } else {
@@ -71,7 +71,7 @@ function NewTaskPage() {
       const formData = new FormData();
       formData.append("workflow_name", workflow);
       formData.append("submitter", submitter.trim());
-      if (isAmazonHlWorkflow) {
+      if (isAmazonAglWorkflow) {
         files.forEach((item) => formData.append("manifest_files", item));
       } else {
         formData.append("fba_text", fbaCheck.codes.join("\n"));
@@ -104,7 +104,7 @@ function NewTaskPage() {
       }
       subtitle={
         <>
-          正常/UPS 粘贴 FBA 号；HL 发货上传 Amazon 后台 CSV。系统会自动校验并排队处理。
+          正常/UPS 粘贴 FBA 号；AGL 发货上传 Amazon 后台 CSV。系统会自动校验并排队处理。
         </>
       }
     >
@@ -119,7 +119,7 @@ function NewTaskPage() {
                 上传清单并开始处理
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
-                正常/UPS 直接粘贴 FBA 号；领星暂时抓不到的 HL 货件, 选择 HL 流程后上传 Amazon CSV。
+                正常/UPS 直接粘贴 FBA 号；领星暂时抓不到的 AGL 货件, 选择 AGL 流程后上传 Amazon CSV。
               </p>
             </div>
             <div className="inline-flex items-center gap-2 rounded-full bg-[color:oklch(0.97_0.01_95)] px-3 py-2 text-xs font-medium text-[color:oklch(0.43_0.03_228)]">
@@ -181,7 +181,7 @@ function NewTaskPage() {
                 value={fbaText}
                 onChange={(event) => setFbaText(event.target.value)}
                 placeholder={"例如：\nFBA19C2P8D5D\nFBA19BXBL1MT"}
-                disabled={isAmazonHlWorkflow}
+                disabled={isAmazonAglWorkflow}
                 className="mt-4 min-h-32 w-full resize-y rounded-2xl border border-[color:oklch(0.86_0.016_95)] bg-white/92 px-4 py-3 text-sm leading-6 text-[color:oklch(0.27_0.025_232)] outline-none transition placeholder:text-[color:oklch(0.67_0.02_228)] focus:border-[color:oklch(0.6_0.09_190)] focus:ring-2 focus:ring-[color:oklch(0.86_0.03_190)]"
               />
               {fbaCheck.invalid.length ? (
@@ -198,7 +198,7 @@ function NewTaskPage() {
                 accept=".csv"
                 multiple
                 className="hidden"
-                disabled={!isAmazonHlWorkflow}
+                disabled={!isAmazonAglWorkflow}
                 onChange={(event) => setFiles(Array.from(event.target.files ?? []))}
               />
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -208,20 +208,20 @@ function NewTaskPage() {
                   </div>
                   <div className="space-y-1">
                     <div className="text-sm font-semibold text-[color:oklch(0.24_0.02_232)]">
-                      上传 HL Amazon CSV 文件
+                      上传 AGL Amazon CSV 文件
                     </div>
                     <div className="text-sm leading-6 text-[color:oklch(0.47_0.03_228)]">
                       方式二：一次可上传多个 Amazon CSV；也支持一个 CSV 内包含多个 FBA 货件。
                     </div>
-                    {!isAmazonHlWorkflow ? (
+                    {!isAmazonAglWorkflow ? (
                       <div className="text-xs font-medium text-[color:oklch(0.5_0.04_70)]">
-                        需要先在“流程类型”里选择 HL 发货 Amazon CSV 整理。
+                        需要先在“流程类型”里选择 AGL 发货 Amazon CSV 整理。
                       </div>
                     ) : null}
                   </div>
                 </div>
                 <div className="rounded-full bg-white px-4 py-2 text-sm font-medium text-[color:oklch(0.33_0.03_232)] shadow-[0_12px_30px_rgba(41,61,52,0.08)]">
-                  {files.length ? `已选 ${files.length} 个 CSV` : isAmazonHlWorkflow ? "点击选择 CSV 文件" : "选择 HL 流程后启用"}
+                  {files.length ? `已选 ${files.length} 个 CSV` : isAmazonAglWorkflow ? "点击选择 CSV 文件" : "选择 AGL 流程后启用"}
                 </div>
               </div>
               {files.length ? (
@@ -261,7 +261,7 @@ function NewTaskPage() {
             Amazon CSV 格式
           </h2>
           <p className="mt-2 text-sm leading-6 text-[color:oklch(0.46_0.03_228)]">
-            HL 发货只需要上传 Amazon 后台导出的货件信息 CSV, 可一次选择多个文件。
+            AGL 发货只需要上传 Amazon 后台导出的货件信息 CSV, 可一次选择多个文件。
           </p>
           <div className="mt-4 rounded-[22px] bg-[color:oklch(0.97_0.012_95)] p-4 text-sm leading-6 text-[color:oklch(0.42_0.03_228)]">
             必须包含: 货件编号, SKU, 商品名称, FNSKU, 原厂包装模板名称, 每箱件数, 箱子总数, 商品总数, 箱号。
@@ -280,7 +280,7 @@ function NewTaskPage() {
                   <span>
                     <span className="block text-sm font-semibold">{filename}</span>
                     <span className="mt-1 block text-xs leading-5 text-[color:oklch(0.48_0.03_228)]">
-                      Amazon 后台导出的 HL 货件 CSV 示例。
+                      Amazon 后台导出的 AGL 货件 CSV 示例。
                     </span>
                   </span>
                 </a>

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from app.core.config import (
-    AMAZON_HL_WORKFLOW_NAME,
+    AMAZON_AGL_WORKFLOW_NAME,
     BROWSER_MAX_CONCURRENCY,
     BROWSER_PROFILE_DIR,
     DEFAULT_CONFIG_PATH,
@@ -22,7 +22,7 @@ from app.models.task import (
     normalize_batch_status,
 )
 from app.services.file_service import (
-    ALLOWED_AMAZON_HL_SUFFIXES,
+    ALLOWED_AMAZON_AGL_SUFFIXES,
     append_log_line,
     build_job_directories,
     cleanup_task_artifacts,
@@ -83,12 +83,12 @@ def validate_workflow_name(workflow_name: str) -> str:
 
 def validate_hl_upload_filename(filename: str | None) -> None:
     suffix = Path(filename or "").suffix.lower()
-    if suffix not in ALLOWED_AMAZON_HL_SUFFIXES:
-        raise ValueError("HL 发货请上传 Amazon 后台导出的 .csv 文件")
+    if suffix not in ALLOWED_AMAZON_AGL_SUFFIXES:
+        raise ValueError("AGL 发货请上传 Amazon 后台导出的 .csv 文件")
 
 
 def task_requires_browser(task: dict) -> bool:
-    return task.get("workflow_name") != AMAZON_HL_WORKFLOW_NAME
+    return task.get("workflow_name") != AMAZON_AGL_WORKFLOW_NAME
 
 
 def parse_hl_shipments_from_paths(paths: list[Path]) -> list[AmazonHlShipment]:
@@ -100,7 +100,7 @@ def parse_hl_shipments_from_paths(paths: list[Path]) -> list[AmazonHlShipment]:
             raise ValueError(f"{path.name} 解析失败：{exc}") from exc
 
     if not shipments:
-        raise ValueError("HL 发货 CSV 中未解析到任何 FBA")
+        raise ValueError("AGL 发货 CSV 中未解析到任何 FBA")
 
     seen: set[str] = set()
     duplicated: list[str] = []
@@ -109,7 +109,7 @@ def parse_hl_shipments_from_paths(paths: list[Path]) -> list[AmazonHlShipment]:
             duplicated.append(shipment.fba_code)
         seen.add(shipment.fba_code)
     if duplicated:
-        raise ValueError(f"HL 发货 CSV 中存在重复 FBA：{', '.join(dict.fromkeys(duplicated))}")
+        raise ValueError(f"AGL 发货 CSV 中存在重复 FBA：{', '.join(dict.fromkeys(duplicated))}")
     return shipments
 
 
@@ -225,11 +225,11 @@ def create_task_submission(
     if not submitter:
         raise ValueError("提交人不能为空")
     pasted_fba_codes = parse_fba_text_input(fba_text)
-    hl_uploads = [upload for upload in ([manifest_upload] + list(manifest_uploads or [])) if upload is not None]
-    if workflow_name == AMAZON_HL_WORKFLOW_NAME:
-        if not hl_uploads:
-            raise ValueError("HL 发货请上传 Amazon 后台导出的 .csv 文件")
-        for upload in hl_uploads:
+    agl_uploads = [upload for upload in ([manifest_upload] + list(manifest_uploads or [])) if upload is not None]
+    if workflow_name == AMAZON_AGL_WORKFLOW_NAME:
+        if not agl_uploads:
+            raise ValueError("AGL 发货请上传 Amazon 后台导出的 .csv 文件")
+        for upload in agl_uploads:
             validate_hl_upload_filename(upload.filename)
     elif workflow_name == LINGXING_WORKFLOW_NAME:
         if not pasted_fba_codes:
@@ -246,15 +246,15 @@ def create_task_submission(
     log_path.touch()
 
     try:
-        if workflow_name == AMAZON_HL_WORKFLOW_NAME:
+        if workflow_name == AMAZON_AGL_WORKFLOW_NAME:
             upload_path, input_manifest_paths, original_filename = save_uploaded_manifests(
-                hl_uploads,
+                agl_uploads,
                 task_id=task_id,
                 input_dir=job_paths["input"],
-                allowed_suffixes=ALLOWED_AMAZON_HL_SUFFIXES,
-                invalid_message="HL 发货请上传 Amazon 后台导出的 .csv 文件",
+                allowed_suffixes=ALLOWED_AMAZON_AGL_SUFFIXES,
+                invalid_message="AGL 发货请上传 Amazon 后台导出的 .csv 文件",
             )
-            append_log_line(log_path, f"任务已创建，开始校验 {len(input_manifest_paths)} 个 Amazon HL CSV 文件")
+            append_log_line(log_path, f"任务已创建，开始校验 {len(input_manifest_paths)} 个 Amazon AGL CSV 文件")
             shipments = parse_hl_shipments_from_paths(input_manifest_paths)
             fba_codes = [shipment.fba_code for shipment in shipments]
         elif pasted_fba_codes:
@@ -316,11 +316,11 @@ def build_task_error_message(batch_report: dict) -> str | None:
 
 def process_amazon_hl_csv_task(task: dict, log) -> dict:
     job_dir = Path(task["job_dir"])
-    manifest_paths = locate_job_manifests(job_dir, allowed_suffixes=ALLOWED_AMAZON_HL_SUFFIXES)
+    manifest_paths = locate_job_manifests(job_dir, allowed_suffixes=ALLOWED_AMAZON_AGL_SUFFIXES)
     reports_root = job_dir / "reports"
     reports_root.mkdir(parents=True, exist_ok=True)
-    source_dir = job_dir / "downloads" / "amazon_hl"
-    output_dir = job_dir / "output" / "amazon_hl"
+    source_dir = job_dir / "downloads" / "amazon_agl"
+    output_dir = job_dir / "output" / "amazon_agl"
     started_at = beijing_now_display()
 
     shipments = parse_hl_shipments_from_paths(manifest_paths)
@@ -347,7 +347,7 @@ def process_amazon_hl_csv_task(task: dict, log) -> dict:
             "error": None,
             "traceback": None,
             "failure_screenshot": None,
-            "amazon_hl_summary": {
+            "amazon_agl_summary": {
                 "cargo_name": shipment.cargo_name,
                 "destination": shipment.destination,
                 "sku_count": shipment.sku_count,
@@ -356,7 +356,7 @@ def process_amazon_hl_csv_task(task: dict, log) -> dict:
             },
         }
         results.append(result)
-        log(f"[{fba_code}] 开始解析 Amazon HL CSV")
+        log(f"[{fba_code}] 开始解析 Amazon AGL CSV")
         try:
             source_workbook, _ = convert_amazon_hl_shipment_to_source_workbook(
                 shipment,
@@ -366,7 +366,7 @@ def process_amazon_hl_csv_task(task: dict, log) -> dict:
             result["downloaded_files"] = [
                 {
                     "sequence": sequence,
-                    "warehouse_code": "AMAZON-HL",
+                    "warehouse_code": "AMAZON-AGL",
                     "path": str(source_workbook),
                     "filename": source_workbook.name,
                     "source": "amazon_csv",
@@ -378,13 +378,13 @@ def process_amazon_hl_csv_task(task: dict, log) -> dict:
             import traceback
 
             result["status"] = "failed"
-            result["error_code"] = "amazon_hl_csv_error"
+            result["error_code"] = "amazon_agl_csv_error"
             result["error"] = str(exc)
             result["traceback"] = traceback.format_exc()
-            log(f"[{fba_code}] HL CSV 转换失败：{exc}")
+            log(f"[{fba_code}] AGL CSV 转换失败：{exc}")
 
     if converted_results:
-        log("开始整理 HL CSV 批次 Excel")
+        log("开始整理 AGL CSV 批次 Excel")
         try:
             process_report = process_workbooks(RESOURCE_DIR, source_dir, output_dir)
             for result in converted_results:
@@ -393,17 +393,17 @@ def process_amazon_hl_csv_task(task: dict, log) -> dict:
                 result["processing_report_file"] = process_report.get("report_file")
                 result["processing_anomalies"] = process_report.get("anomalies", [])
                 result["status"] = "success"
-                log(f"[{result['fba_code']}] HL CSV 整理完成")
+                log(f"[{result['fba_code']}] AGL CSV 整理完成")
         except Exception as exc:
             import traceback
 
             error_traceback = traceback.format_exc()
             for result in converted_results:
                 result["status"] = "failed"
-                result["error_code"] = "amazon_hl_csv_process_error"
+                result["error_code"] = "amazon_agl_csv_process_error"
                 result["error"] = str(exc)
                 result["traceback"] = error_traceback
-            log(f"HL CSV 批次整理失败：{exc}")
+            log(f"AGL CSV 批次整理失败：{exc}")
 
     finished_at = beijing_now_display()
     for result in results:
@@ -437,10 +437,10 @@ def process_amazon_hl_csv_task(task: dict, log) -> dict:
         "status": batch_status,
         "results": results,
         "fatal_error": None,
-        "source": "amazon_hl_csv",
+        "source": "amazon_agl_csv",
     }
     (reports_root / "batch_report.json").write_text(json.dumps(batch_report, ensure_ascii=False, indent=2), encoding="utf-8")
-    log(f"HL CSV 批次完成，状态：{batch_report['status']}")
+    log(f"AGL CSV 批次完成，状态：{batch_report['status']}")
     return batch_report
 
 
@@ -535,7 +535,7 @@ def process_task(task: dict) -> dict:
     try:
         log("任务进入运行中")
         manifest_path = locate_job_manifest(job_dir)
-        if task.get("workflow_name") == AMAZON_HL_WORKFLOW_NAME:
+        if task.get("workflow_name") == AMAZON_AGL_WORKFLOW_NAME:
             batch_report = process_amazon_hl_csv_task(task, log)
         else:
             batch_report = run_manifest_job(

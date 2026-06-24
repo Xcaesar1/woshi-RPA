@@ -27,7 +27,7 @@ SQLITE_JOURNAL_MODE = os.environ.get("SQLITE_JOURNAL_MODE", "WAL").strip().upper
 RESOURCE_DIR = ROOT_DIR
 DEFAULT_CONFIG_PATH = ROOT_DIR / "lingxing_rpa.local.json"
 EXAMPLE_MANIFESTS = {
-    "amazon_hl_shipment.csv": ROOT_DIR / "amazon_hl_shipment.csv",
+    "amazon_agl_shipment.csv": ROOT_DIR / "amazon_agl_shipment.csv",
 }
 
 
@@ -68,15 +68,17 @@ PLAYWRIGHT_HEADLESS = env_bool("PLAYWRIGHT_HEADLESS", False)
 RECENT_LOG_LINE_COUNT = 120
 
 LINGXING_WORKFLOW_NAME = "lingxing_fba_download_and_process"
-AMAZON_HL_WORKFLOW_NAME = "amazon_hl_csv_process"
+AMAZON_AGL_WORKFLOW_NAME = "amazon_hl_csv_process"
+# Existing task records already store this workflow name. Keep the old alias for compatibility.
+AMAZON_HL_WORKFLOW_NAME = AMAZON_AGL_WORKFLOW_NAME
 
 DEFAULT_WORKFLOW = WorkflowDefinition(
     name=LINGXING_WORKFLOW_NAME,
     label="正常/UPS：通过领星下载并整理",
 )
 AMAZON_HL_WORKFLOW = WorkflowDefinition(
-    name=AMAZON_HL_WORKFLOW_NAME,
-    label="HL 发货 Amazon CSV 整理",
+    name=AMAZON_AGL_WORKFLOW_NAME,
+    label="AGL 发货 Amazon CSV 整理",
 )
 WORKFLOW_REGISTRY = {
     DEFAULT_WORKFLOW.name: DEFAULT_WORKFLOW,

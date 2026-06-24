@@ -395,11 +395,11 @@ def convert_amazon_hl_shipment_to_source_workbook(
 ) -> tuple[Path, AmazonHlShipment]:
     product_mapping = load_msku_product_mapping(resource_dir, [item.msku for item in shipment.items])
     output_dir.mkdir(parents=True, exist_ok=True)
-    workbook_path = output_dir / f"{sanitize_filename_part(shipment.fba_code)}_AMAZON_HL_NO_PIC.xlsx"
+    workbook_path = output_dir / f"{sanitize_filename_part(shipment.fba_code)}_AMAZON_AGL_NO_PIC.xlsx"
 
     workbook = Workbook()
     worksheet = workbook.active
-    worksheet.title = "Amazon HL"
+    worksheet.title = "Amazon AGL"
 
     metadata_rows = [
         ("货件单号", shipment.fba_code),
